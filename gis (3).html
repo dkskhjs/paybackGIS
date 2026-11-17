@@ -1,0 +1,3205 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>고양 창릉 지번 기반 엑셀 연동 GIS 시스템</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS & JS (지도 뷰어 엔진) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- SheetJS (엑셀 파일 파싱 및 내보내기) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- Proj4js (한국 측량 좌표계 EPSG:5186 / 5174 / 5179 <-> WGS84 변환) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
+    <!-- shpjs (국토정보플랫폼 연속지적도 SHP zip 파일 브라우저 직접 파싱) -->
+    <script src="https://unpkg.com/shpjs@latest/dist/shp.js"></script>
+    <!-- Font Awesome 아이콘 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', 'Malgun Gothic', sans-serif; overflow: hidden; }
+        #map { width: 100%; height: 100%; z-index: 1; background-color: #f1f5f9; }
+        /* 지번 라벨 스타일 (배경 없이 깔끔한 텍스트 외곽선) */
+        .jibun-label {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            color: #1e293b;
+            font-weight: 700;
+            font-size: 11px;
+            text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        /* CAD 사업구간 라벨 스타일 */
+        .cad-zone-label {
+            background: rgba(109, 40, 217, 0.88) !important;
+            border: 1px solid #ffffff !important;
+            border-radius: 6px !important;
+            color: #ffffff !important;
+            font-weight: 700;
+            font-size: 11px;
+            padding: 2px 7px !important;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.25) !important;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        /* Leaflet 툴팁 최대 너비 제한 (거대 흰색 가로 바 방지) */
+        .leaflet-tooltip {
+            max-width: 220px !important;
+            white-space: normal !important;
+            word-break: keep-all;
+            font-size: 11px !important;
+            padding: 4px 8px !important;
+            line-height: 1.35 !important;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.25) !important;
+        }
+        /* 좌측 패널 및 엑셀 열 너비 조절 핸들 */
+        #sidebar-resizer {
+            width: 5px;
+            cursor: col-resize;
+            background: transparent;
+            transition: background-color 0.15s;
+            z-index: 25;
+        }
+        #sidebar-resizer:hover, #sidebar-resizer.resizing {
+            background-color: #3b82f6;
+        }
+        .col-resizer {
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 5px;
+            cursor: col-resize;
+            user-select: none;
+        }
+        .col-resizer:hover {
+            background-color: rgba(59, 130, 246, 0.6);
+        }
+        /* 커스텀 스크롤바 */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-800 h-screen flex flex-col">
+
+    <!-- 상단 헤더 -->
+    <header class="bg-slate-900 text-white px-3 py-2 flex items-center justify-between border-b border-slate-800 z-30 shrink-0 shadow-md gap-2">
+        <div class="flex items-center space-x-2 min-w-0">
+            <button id="toggle-sidebar-btn" onclick="toggleSidebar()" class="md:hidden p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200">
+                <i class="fa-solid fa-bars text-xs"></i>
+            </button>
+            <div class="bg-blue-600 p-1.5 rounded-lg shrink-0">
+                <i class="fa-solid fa-map-location-dot text-sm text-white"></i>
+            </div>
+            <div class="min-w-0">
+                <div class="flex items-center space-x-1.5">
+                    <h1 class="text-sm font-bold tracking-tight truncate">창릉지구 지번별 엑셀 연동 GIS</h1>
+                    <span id="map-provider-badge" class="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0">
+                        VWorld API · Canvas
+                    </span>
+                </div>
+            </div>
+        </div>
+
+        <div class="flex items-center space-x-1.5 shrink-0">
+            <!-- 브이월드 API 키 입력 모달 버튼 -->
+            <button onclick="openApiKeyModal()" class="bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-semibold px-2.5 py-1 rounded-md transition flex items-center space-x-1 shadow-sm" title="브이월드 오픈API 인증키 설정">
+                <i class="fa-solid fa-key text-[10px]"></i>
+                <span class="hidden sm:inline">브이월드 API 키</span>
+            </button>
+
+            <!-- 로컬 연속지적도 SHP(zip) / GeoJSON 파일 업로드 버튼 -->
+            <label for="shp-upload" class="cursor-pointer bg-teal-600 hover:bg-teal-500 text-white text-[11px] font-semibold px-2.5 py-1 rounded-md transition flex items-center space-x-1 shadow-sm" title="사내망 차단 시 로컬 연속지적도 SHP(.zip) 또는 GeoJSON 직접 병합">
+                <i class="fa-solid fa-layer-group text-[10px]"></i>
+                <span class="hidden lg:inline">지적도 SHP(.zip)</span>
+            </label>
+            <input type="file" id="shp-upload" accept=".zip,.geojson,.json" class="hidden" onchange="handleLocalShpUpload(event)">
+
+            <!-- CAD 파일(.dxf) 사업구간 해치 업로드 버튼 -->
+            <label for="cad-upload" class="cursor-pointer bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-semibold px-2.5 py-1 rounded-md transition flex items-center space-x-1 shadow-sm" title="AutoCAD DXF 파일의 사업구간 해치(HATCH) 및 닫힌 폴리라인 매핑">
+                <i class="fa-solid fa-vector-square text-[10px]"></i>
+                <span class="hidden sm:inline">CAD 사업구간 (.dxf)</span>
+            </label>
+            <input type="file" id="cad-upload" accept=".dxf" class="hidden" onchange="handleCadDxfUpload(event)">
+
+            <!-- 수정된 엑셀 새 파일 저장 버튼 -->
+            <button id="btn-export-modified" onclick="exportModifiedExcel()" class="hidden bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold px-2.5 py-1 rounded-md transition flex items-center space-x-1 shadow-sm" title="웹에서 수정한 내용 및 열 너비/숨김 설정이 반영된 새 엑셀(.xlsx) 파일 저장">
+                <i class="fa-solid fa-file-export text-[10px]"></i>
+                <span class="hidden sm:inline">수정본 엑셀 저장</span>
+            </button>
+
+            <!-- 작업 프로젝트(엑셀+CAD+API+매핑결과) 통째 저장 / 불러오기 -->
+            <button onclick="exportWorkspaceProject()" class="bg-slate-700 hover:bg-slate-600 text-slate-100 text-[11px] font-semibold px-2.5 py-1 rounded-md transition flex items-center space-x-1 border border-slate-600 shadow-sm" title="현재 업로드된 엑셀(수정내용 포함), CAD 사업구간, API 키 및 매핑 결과를 작업 파일(.json)로 저장">
+                <i class="fa-solid fa-floppy-disk text-[10px]"></i>
+                <span class="hidden md:inline">작업 저장</span>
+            </button>
+            <label for="project-upload" class="cursor-pointer bg-slate-700 hover:bg-slate-600 text-slate-100 text-[11px] font-semibold px-2.5 py-1 rounded-md transition flex items-center space-x-1 border border-slate-600 shadow-sm" title="저장된 작업 프로젝트(.json) 파일 불러오기">
+                <i class="fa-solid fa-folder-open text-[10px]"></i>
+                <span class="hidden md:inline">작업 불러오기</span>
+            </label>
+            <input type="file" id="project-upload" accept=".json" class="hidden" onchange="importWorkspaceProject(event)">
+
+            <!-- 엑셀 업로드 버튼 -->
+            <label for="excel-upload" class="cursor-pointer bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold px-2.5 py-1 rounded-md transition flex items-center space-x-1 shadow-sm" title="엑셀 지번조서 업로드">
+                <i class="fa-solid fa-file-excel text-[10px]"></i>
+                <span>엑셀 첨부 (.xlsx)</span>
+            </label>
+            <input type="file" id="excel-upload" accept=".xlsx, .xls, .csv" class="hidden" onchange="handleFileUpload(event)">
+        </div>
+    </header>
+
+    <!-- 메인 워크스페이스 -->
+    <div class="flex-1 flex overflow-hidden relative">
+        
+        <!-- 좌측 사이드바: 엑셀 데이터 설정 및 지번 목록 테이블 -->
+        <aside id="left-sidebar" style="width: 400px;" class="bg-white border-r border-slate-200 flex flex-col z-20 transition-transform duration-300 absolute md:relative h-full -translate-x-full md:translate-x-0 shadow-xl md:shadow-none shrink-0">
+            
+            <!-- 엑셀 열 매핑 및 시각화 기준 설정 영역 (접기/펼치기 지원) -->
+            <div class="p-3 bg-slate-50 border-b border-slate-200 space-y-2.5 shrink-0">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs font-bold text-slate-700 flex items-center">
+                        <i class="fa-solid fa-sliders text-blue-600 mr-1.5"></i>브이월드 · 엑셀 매핑 설정
+                    </span>
+                    <div class="flex items-center space-x-2">
+                        <span id="record-count-badge" class="text-[11px] font-semibold bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full">0 필지</span>
+                        <button type="button" onclick="toggleConfigPanel()" id="btn-toggle-config" class="text-slate-500 hover:text-slate-800 p-1 rounded hover:bg-slate-200/60 transition" title="설정 영역 접기/펼치기">
+                            <i id="config-toggle-icon" class="fa-solid fa-chevron-up text-xs"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 접기/펼치기 대상 컨테이너 -->
+                <div id="config-collapsible-content" class="space-y-2.5 transition-all duration-200">
+                    <!-- 시트 선택 & 헤더 행 지정 -->
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-500 mb-1">엑셀 시트</label>
+                            <select id="sheet-select" onchange="loadSheetData(this.value)" class="w-full text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:border-blue-500">
+                                <option value="">시트 없음</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-500 mb-1">헤더(제목) 행</label>
+                            <select id="header-row-select" onchange="onHeaderRowChange()" class="w-full text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:border-blue-500">
+                                <option value="auto">자동 탐지</option>
+                                <option value="0">1행 (맨 위)</option>
+                                <option value="1">2행</option>
+                                <option value="2">3행</option>
+                                <option value="3">4행</option>
+                                <option value="4">5행</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- 지번(동·본번·부번) 기준 열 & 색상 분류 열 선택 -->
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-500 mb-1">동·본번·부번(지번) 열</label>
+                            <select id="col-jibun-select" onchange="onJibunColumnChanged()" class="w-full text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:border-blue-500">
+                                <option value="">자동 인식</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-500 mb-1">색상 분류 열</label>
+                            <select id="col-color-select" onchange="reprocessMapping()" class="w-full text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:border-blue-500">
+                                <option value="">단일 색상 표시</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- 동·본번·부번 선택 후 수동 지적도 조회 실행 버튼 -->
+                    <div class="flex items-center space-x-1.5">
+                        <button id="btn-start-vworld-sync" onclick="triggerVworldSync()" disabled class="flex-1 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 disabled:cursor-not-allowed text-white text-xs font-bold py-2 px-3 rounded-lg transition flex items-center justify-center space-x-1.5 shadow-sm">
+                            <i class="fa-solid fa-magnifying-glass-location"></i>
+                            <span id="btn-start-vworld-text">선택한 지번 열로 브이월드 지적도 조회</span>
+                        </button>
+                        <button id="btn-stop-vworld-sync" onclick="stopVworldSync()" class="hidden bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold py-2 px-2.5 rounded-lg transition shrink-0 shadow-sm" title="조회 즉시 중지 및 현재까지 결과 반영">
+                            <i class="fa-solid fa-stop"></i>
+                        </button>
+                    </div>
+
+                    <!-- 실제 지적 경계 매칭 결과 요약 및 미조회 추출 -->
+                    <div class="flex items-center justify-between bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-[11px]">
+                        <div class="flex items-center space-x-2">
+                            <span class="text-emerald-700 font-bold" id="match-ok-count">일치 0</span>
+                            <span class="text-rose-600 font-bold" id="match-fail-count">미조회 0</span>
+                        </div>
+                        <button id="btn-export-unmatched" onclick="exportUnmatchedExcel()" class="hidden bg-rose-600 hover:bg-rose-500 text-white px-2 py-0.5 rounded font-semibold transition">
+                            미조회 추출
+                        </button>
+                    </div>
+
+                    <!-- 필터 탭 -->
+                    <div class="grid grid-cols-3 gap-1 bg-slate-200/80 p-1 rounded-lg text-[11px] font-semibold">
+                        <button id="filter-all" onclick="setMatchFilter('all')" class="py-1 rounded-md bg-slate-800 text-white shadow-sm">전체</button>
+                        <button id="filter-matched" onclick="setMatchFilter('matched')" class="py-1 rounded-md text-slate-600 hover:text-slate-900">일치만</button>
+                        <button id="filter-unmatched" onclick="setMatchFilter('unmatched')" class="py-1 rounded-md text-slate-600 hover:text-slate-900">미조회만</button>
+                    </div>
+                </div> <!-- /config-collapsible-content 닫기 -->
+
+                <!-- CAD 사업구간(DXF) 제어 및 지번 자동 매핑 패널 (접기 상태에서도 유지됨) -->
+                <div id="cad-control-panel" class="hidden bg-purple-50 border border-purple-200 rounded-lg p-2 space-y-1.5 text-[11px] overflow-hidden">
+                    <div class="flex flex-wrap items-center justify-between gap-1">
+                        <span class="font-bold text-purple-900 flex items-center space-x-1 min-w-0 truncate">
+                            <i class="fa-solid fa-vector-square text-purple-600 shrink-0"></i>
+                            <span id="cad-zone-summary" class="truncate">CAD 사업구간 0개</span>
+                        </span>
+                        <div class="flex items-center space-x-1 shrink-0">
+                            <button onclick="autoSnapCadToCadastralParcels(true)" class="bg-emerald-600 hover:bg-emerald-500 text-white px-1.5 py-0.5 rounded font-semibold transition whitespace-nowrap" title="조회된 지적 필지 경계 및 지번 텍스트 위치에 맞춰 CAD 도면 자동 정렬">
+                                지적도 자동맞춤
+                            </button>
+                            <button onclick="openCadAlignModal()" class="bg-purple-600 hover:bg-purple-500 text-white px-1.5 py-0.5 rounded font-semibold transition whitespace-nowrap" title="1점/2점 기준점 클릭 또는 미세 이동·축척 보정">
+                                미세보정
+                            </button>
+                            <button onclick="openCadRenameModal()" class="bg-white hover:bg-purple-100 text-purple-800 border border-purple-300 px-1.5 py-0.5 rounded font-semibold transition whitespace-nowrap" title="해치 위 텍스트에서 추출된 사업구간 이름 확인 및 수동 수정">
+                                구간명
+                            </button>
+                            <select id="cad-crs-select" onchange="reprojectCadZones()" class="border border-purple-300 rounded px-1 py-0.5 bg-white text-purple-900 font-semibold text-[10px]">
+                                <option value="AUTO">자동맞춤</option>
+                                <option value="EPSG:5186">중부(5186)</option>
+                                <option value="EPSG:5174">구중부(5174)</option>
+                                <option value="EPSG:5179">UTM-K(5179)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-1.5 min-w-0">
+                        <select id="cad-zone-filter" onchange="setCadZoneFilter(this.value)" class="flex-1 min-w-0 w-full truncate border border-purple-300 rounded px-2 py-1 bg-white text-slate-800 font-medium">
+                            <option value="all">전체 사업구간 지번 보기</option>
+                            <option value="in_any_zone">사업구간 내 포함 지번만</option>
+                            <option value="outside_zone">사업구간 외 지번만</option>
+                        </select>
+                        <button onclick="appendCadZoneColumnToExcel()" class="bg-purple-700 hover:bg-purple-600 text-white px-2 py-1 rounded font-semibold shrink-0 whitespace-nowrap transition" title="각 지번이 속한 CAD 사업구간 명칭을 엑셀 새 열로 자동 추가">
+                            + 엑셀 열 추가
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 브이월드 API 상태 및 응답 진단 버튼 -->
+                <div class="flex items-center justify-between bg-slate-100 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[11px]">
+                    <span id="cadastral-status-text" class="text-slate-600 truncate pr-1">API 키 입력 후 조회 버튼을 눌러주세요</span>
+                    <button onclick="openVworldDiagModal()" class="bg-slate-700 hover:bg-slate-600 text-white px-2 py-0.5 rounded font-semibold shrink-0 transition">
+                        응답진단
+                    </button>
+                </div>
+
+                <!-- 지번 및 속성 검색 + 열 표시/숨기기 관리 버튼 -->
+                <div class="flex items-center gap-1.5">
+                    <div class="relative flex-1">
+                        <input type="text" id="search-input" onkeyup="debouncedFilterTable()" placeholder="지번(예: 용두동 102-94) 또는 엑셀 내용 검색..." 
+                            class="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white focus:outline-none focus:border-blue-500">
+                        <i class="fa-solid fa-magnifying-glass text-slate-400 text-xs absolute left-2.5 top-2"></i>
+                    </div>
+                    <button type="button" onclick="toggleColumnManagerPanel()" id="btn-col-manager" class="bg-slate-700 hover:bg-slate-600 text-white text-[11px] font-semibold px-2.5 py-1.5 rounded-lg transition flex items-center space-x-1 shrink-0 shadow-sm" title="엑셀 열 숨기기/보이기 및 열 너비 관리 (수정본 엑셀 저장 시 반영)">
+                        <i class="fa-solid fa-table-columns text-[10px]"></i>
+                        <span>열 관리</span>
+                        <span id="hidden-col-badge" class="hidden bg-amber-400 text-slate-900 text-[9px] font-bold px-1 rounded">0</span>
+                    </button>
+                </div>
+
+                <!-- 엑셀 열 표시/숨기기 및 너비 초기화 드롭다운 패널 -->
+                <div id="column-manager-panel" class="hidden bg-slate-800 text-white rounded-lg p-2.5 space-y-2 text-[11px] shadow-lg">
+                    <div class="flex items-center justify-between border-b border-slate-700 pb-1.5">
+                        <span class="font-bold text-slate-200 flex items-center space-x-1.5">
+                            <i class="fa-solid fa-eye text-blue-400"></i>
+                            <span>엑셀 열 표시/숨기기 (저장 시 반영)</span>
+                        </span>
+                        <div class="flex items-center space-x-2 text-[10px]">
+                            <button type="button" onclick="showAllExcelColumns()" class="text-emerald-400 hover:underline font-semibold">모두 보이기</button>
+                            <span class="text-slate-600">|</span>
+                            <button type="button" onclick="resetAllColumnWidths()" class="text-blue-300 hover:underline font-semibold">너비 초기화</button>
+                            <button type="button" onclick="toggleColumnManagerPanel()" class="text-slate-400 hover:text-white ml-1">
+                                <i class="fa-solid fa-xmark"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="column-manager-list" class="max-h-36 overflow-y-auto grid grid-cols-2 gap-1 pr-1">
+                    </div>
+                </div>
+
+                <!-- 다중/일괄 선택 및 특정 열 일괄 수정(추가/수정/제거) 패널 -->
+                <div id="bulk-edit-panel" class="hidden bg-indigo-50 border border-indigo-200 rounded-lg p-2.5 space-y-2 text-[11px] shadow-sm">
+                    <div class="flex items-center justify-between">
+                        <span class="font-bold text-indigo-950 flex items-center space-x-1">
+                            <i class="fa-solid fa-list-check text-indigo-600"></i>
+                            <span id="bulk-selected-count">0개 필지 일괄 선택됨</span>
+                        </span>
+                        <div class="flex items-center space-x-1.5 text-[10px]">
+                            <button type="button" onclick="selectAllFilteredParcels()" class="text-indigo-700 hover:underline font-semibold">필터전체선택</button>
+                            <span class="text-slate-300">|</span>
+                            <button type="button" onclick="clearMultiSelection()" class="text-slate-500 hover:text-rose-600 font-semibold">선택해제</button>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-1.5">
+                        <div>
+                            <label class="block text-[10px] font-semibold text-indigo-800 mb-0.5">수정할 대상 열</label>
+                            <select id="bulk-target-col" onchange="toggleBulkNewColInput()" class="w-full text-[11px] border border-indigo-300 rounded px-1.5 py-1 bg-white text-slate-800 font-medium">
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-semibold text-indigo-800 mb-0.5">작업 방식</label>
+                            <select id="bulk-edit-mode" onchange="onBulkEditModeChange()" class="w-full text-[11px] border border-indigo-300 rounded px-1.5 py-1 bg-white text-slate-800 font-medium">
+                                <option value="set">값 일괄 수정 (덮어쓰기)</option>
+                                <option value="append">기존 값 뒤에 추가</option>
+                                <option value="prepend">기존 값 앞에 추가</option>
+                                <option value="clear">내용 일괄 제거 (비우기)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="bulk-new-col-wrap" class="hidden">
+                        <input type="text" id="bulk-new-col-name" placeholder="새로 생성할 열 이름 (예: 사업지구구분)" 
+                            class="w-full text-[11px] border border-indigo-300 rounded px-2 py-1 bg-white text-slate-900 focus:outline-none focus:border-indigo-500">
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <input type="text" id="bulk-edit-value" onkeydown="if(event.key==='Enter') applyBulkColumnEdit()" placeholder="일괄 입력할 내용 (예: 1공구 사업지구)"
+                            class="flex-1 text-[11px] border border-indigo-300 rounded px-2 py-1.5 bg-white text-slate-900 focus:outline-none focus:border-indigo-500">
+                        <button type="button" onclick="applyBulkColumnEdit()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold px-3 py-1.5 rounded transition shrink-0 shadow-sm">
+                            일괄적용
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 불러온 엑셀 데이터 리스트 -->
+            <div class="flex-1 overflow-auto bg-white" id="table-container" onscroll="handleTableScroll()">
+                <div id="empty-state" class="h-full flex flex-col items-center justify-center p-6 text-center text-slate-400">
+                    <i class="fa-solid fa-table text-4xl mb-3 text-slate-300"></i>
+                    <p class="text-sm font-medium text-slate-600">엑셀 파일을 첨부해 주세요</p>
+                    <p class="text-xs mt-1 leading-relaxed">우측 상단 <strong>[엑셀 첨부 (.xlsx)]</strong> 버튼을 눌러<br>지번조서를 올린 뒤, 동·본번·부번 열을 선택하고<br><strong>[선택한 지번 열로 브이월드 지적도 조회]</strong>를 누르세요.</p>
+                </div>
+                <table id="excel-table" class="hidden text-left border-collapse text-xs" style="table-layout: fixed; width: max-content;">
+                    <thead id="excel-thead" class="bg-slate-100 text-slate-600 sticky top-0 z-10 border-b border-slate-200 whitespace-nowrap">
+                    </thead>
+                    <tbody id="excel-tbody" class="divide-y divide-slate-100 whitespace-nowrap">
+                    </tbody>
+                </table>
+            </div>
+        </aside>
+
+        <!-- 좌측 사이드바 너비 드래그 조절 핸들 -->
+        <div id="sidebar-resizer" class="hidden md:block shrink-0" title="드래그하여 좌측 패널 및 엑셀 표 영역 너비 조절"></div>
+
+        <!-- 중앙 지도 영역 -->
+        <main class="flex-1 relative h-full min-w-0">
+            <div id="map"></div>
+
+            <!-- 지도 상단 레이어 & 배경지도 컨트롤 -->
+            <div class="absolute top-3 left-3 z-20 flex flex-wrap items-center gap-1.5 bg-white/95 backdrop-blur px-2.5 py-1.5 rounded-lg shadow border border-slate-200 text-xs">
+                <button onclick="fitAllParcels()" class="px-2 py-1 rounded hover:bg-slate-100 font-semibold text-slate-700 flex items-center space-x-1" title="창릉지구 전체 필지 보기">
+                    <i class="fa-solid fa-expand text-blue-600"></i>
+                    <span>전체 필지</span>
+                </button>
+                <div class="h-4 w-[1px] bg-slate-300"></div>
+                <button id="btn-base-vworld" onclick="setBaseMap('vworld')" class="px-2 py-1 rounded hover:bg-slate-100 text-slate-700 font-medium" title="브이월드 일반지도 (API 키 필요)">브이월드지도</button>
+                <button id="btn-base-osm" onclick="setBaseMap('osm')" class="px-2 py-1 rounded bg-blue-600 text-white font-medium">일반(OSM)</button>
+                <button id="btn-base-sat" onclick="setBaseMap('sat')" class="px-2 py-1 rounded hover:bg-slate-100 text-slate-700 font-medium">위성지도</button>
+                <button id="btn-base-none" onclick="setBaseMap('none')" class="px-2 py-1 rounded hover:bg-slate-100 text-slate-700 font-medium">배경끄기</button>
+                <div class="h-4 w-[1px] bg-slate-300"></div>
+                <label class="flex items-center space-x-1 cursor-pointer select-none px-1" title="브이월드 연속지적도(배경 타일) 겹쳐보기">
+                    <input type="checkbox" id="toggle-cadastral-wmts" onchange="toggleVworldCadastralTile(this.checked)" class="rounded text-amber-600">
+                    <span class="font-semibold text-amber-700">지적편집도</span>
+                </label>
+                <label class="flex items-center space-x-1 cursor-pointer select-none px-1">
+                    <input type="checkbox" id="toggle-labels" checked onchange="updateViewportLabels()" class="rounded text-blue-600">
+                    <span class="font-medium text-slate-700">지번라벨</span>
+                </label>
+                <label id="cad-layer-toggle-wrap" class="hidden flex items-center space-x-1 cursor-pointer select-none px-1">
+                    <input type="checkbox" id="toggle-cad-zones" checked onchange="toggleCadZonesLayer(this.checked)" class="rounded text-purple-600">
+                    <span class="font-semibold text-purple-700">CAD구간</span>
+                </label>
+            </div>
+
+            <!-- 좌하단 범례(Legend) 패널: 클릭 시 색상/투명도/보기끄기 설정, Shift+클릭 시 다중 단독 필터 -->
+            <div id="map-legend" class="hidden absolute bottom-11 left-3 z-20 bg-white/95 backdrop-blur p-3 rounded-xl shadow-lg border border-slate-200 max-w-xs text-xs">
+                <div class="flex items-center justify-between border-b border-slate-100 pb-1.5 mb-1">
+                    <div id="legend-title" class="font-bold text-slate-800 truncate pr-2">범례</div>
+                    <button type="button" onclick="resetAllLegendStyles()" class="text-[10px] text-blue-600 hover:underline font-semibold shrink-0" title="모든 항목 표시 및 기본 투명도 복원">전체보기</button>
+                </div>
+                <div class="text-[10px] text-slate-400 mb-1.5 leading-tight">
+                    클릭: 색상·투명도·끄기 / <kbd class="px-1 bg-slate-100 border border-slate-300 rounded text-slate-600">Shift</kbd>+클릭: 다중선택
+                </div>
+                <div id="legend-items" class="space-y-1 max-h-44 overflow-y-auto pr-1"></div>
+
+                <!-- 범례 항목 클릭 시 표시되는 개별 스타일(색상·투명도·보기끄기) 팝오버 -->
+                <div id="legend-item-popover" class="hidden mt-2 pt-2 border-t border-slate-200 bg-slate-50 rounded-lg p-2 space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span id="popover-item-name" class="font-bold text-slate-800 truncate pr-1 text-[11px]">항목명</span>
+                        <button type="button" onclick="closeLegendPopover()" class="text-slate-400 hover:text-slate-700 px-1">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </div>
+                    <div class="flex items-center justify-between gap-2">
+                        <label class="flex items-center space-x-1.5 cursor-pointer">
+                            <span class="text-[11px] text-slate-600 font-medium">색상</span>
+                            <input type="color" id="popover-color-input" onchange="onLegendColorChange(this.value)" class="w-6 h-5 p-0 border border-slate-300 rounded cursor-pointer">
+                        </label>
+                        <label class="flex items-center space-x-1.5 cursor-pointer">
+                            <input type="checkbox" id="popover-visible-input" onchange="onLegendVisibleChange(this.checked)" class="rounded text-blue-600">
+                            <span class="text-[11px] text-slate-700 font-semibold">지도에 표시</span>
+                        </label>
+                    </div>
+                    <div>
+                        <div class="flex justify-between text-[10px] text-slate-600 mb-0.5">
+                            <span>채우기 투명도(불투명도)</span>
+                            <span id="popover-opacity-label" class="font-mono font-bold text-blue-600">50%</span>
+                        </div>
+                        <input type="range" id="popover-opacity-input" min="0" max="100" step="5" value="50" oninput="onLegendOpacityChange(this.value)" class="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600">
+                    </div>
+                </div>
+            </div>
+
+            <!-- 하단 현재 좌표 및 영역 안내 -->
+            <div class="absolute bottom-3 left-3 z-20 bg-slate-900/85 text-white text-[11px] px-3 py-1.5 rounded-lg backdrop-blur flex items-center space-x-3 shadow">
+                <span><i class="fa-solid fa-location-crosshairs text-blue-400 mr-1"></i>고양 창릉지구 (덕양구 원흥·동산·용두동)</span>
+                <span class="text-slate-400">|</span>
+                <span id="cursor-coords" class="font-mono text-slate-300">37.63850, 126.87320</span>
+            </div>
+        </main>
+
+        <!-- 우측 상세 정보 & 직접 수정 패널 (필지 클릭 시 오픈) -->
+        <aside id="detail-panel" class="hidden w-80 bg-white border-l border-slate-200 flex flex-col z-20 shadow-xl shrink-0">
+            <div class="p-4 bg-slate-900 text-white flex items-center justify-between shrink-0">
+                <div>
+                    <div class="flex items-center space-x-1.5">
+                        <span class="text-[10px] uppercase tracking-wider text-blue-400 font-bold">필지 상세 및 엑셀 수정</span>
+                        <span id="detail-match-badge" class="text-[10px] px-1.5 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-300">실제 지적경계</span>
+                    </div>
+                    <h2 id="detail-jibun" class="text-base font-bold mt-0.5">용두동 102-94</h2>
+                </div>
+                <button onclick="closeDetailPanel()" class="text-slate-400 hover:text-white p-1">
+                    <i class="fa-solid fa-xmark text-lg"></i>
+                </button>
+            </div>
+            <div class="p-4 flex-1 overflow-y-auto space-y-2.5" id="detail-content">
+                <!-- 선택된 필지의 엑셀 전체 행 데이터 편집 폼 -->
+            </div>
+            <div class="p-3 bg-slate-50 border-t border-slate-200 flex items-center space-x-2 shrink-0">
+                <button onclick="saveDetailPanelEdits()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-2 px-3 rounded-lg transition flex items-center justify-center space-x-1.5 shadow-sm">
+                    <i class="fa-solid fa-check"></i>
+                    <span>수정사항 반영</span>
+                </button>
+                <button onclick="exportModifiedExcel()" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold py-2 px-3 rounded-lg transition flex items-center justify-center space-x-1 shadow-sm" title="수정된 전체 엑셀을 새 파일로 저장">
+                    <i class="fa-solid fa-download"></i>
+                    <span>새 엑셀 저장</span>
+                </button>
+            </div>
+        </aside>
+    </div>
+
+    <!-- 브이월드(VWorld) API 키 입력 모달 -->
+    <div id="apikey-modal" class="hidden fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-200">
+            <div class="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between">
+                <div class="flex items-center space-x-2">
+                    <i class="fa-solid fa-key text-amber-400"></i>
+                    <h3 class="font-bold text-sm">브이월드(VWorld) 오픈API 인증키 설정</h3>
+                </div>
+                <button type="button" onclick="closeApiKeyModal()" class="text-slate-400 hover:text-white p-1">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div class="p-5 space-y-3.5 text-xs text-slate-600">
+                <p class="leading-relaxed">
+                    브이월드(<strong>vworld.kr</strong>)에서 발급받은 <strong>오픈API 인증키</strong>를 입력하면 연속지적도(`LP_PA_CBND_BUBUN`) 필지 폴리곤과 배경 지적편집도를 조회할 수 있습니다.
+                </p>
+                <div class="bg-blue-50 border border-blue-200 rounded-lg p-2.5 text-[11px] text-blue-900 space-y-1">
+                    <div class="font-bold flex items-center justify-between">
+                        <span><i class="fa-solid fa-circle-info text-blue-600 mr-1"></i>브이월드 인증키 서비스 URL(도메인) 안내</span>
+                        <button type="button" onclick="copyCurrentDomain()" class="bg-blue-600 hover:bg-blue-500 text-white px-2 py-0.5 rounded text-[10px] font-semibold">도메인 복사</button>
+                    </div>
+                    <p class="leading-normal">
+                        • 로컬 PC에서 열 때: 브이월드 키 설정에 <code class="bg-white px-1 py-0.5 rounded border border-blue-200 font-mono">http://localhost</code> 등록<br>
+                        • 현재 브라우저 감지 도메인: <code id="detected-domain-display" class="bg-white px-1 py-0.5 rounded border border-blue-200 font-mono font-bold">localhost</code>
+                    </p>
+                </div>
+                <div>
+                    <label class="block font-bold text-slate-700 mb-1">브이월드 인증키 (API Key)</label>
+                    <input type="text" id="map-api-key-input" onkeydown="if(event.key==='Enter') applyMapApiKey()" placeholder="예: 12345678-ABCD-EFGH-IJKL-1234567890AB" 
+                        class="w-full border border-slate-300 rounded-lg px-3 py-2 font-mono text-xs text-slate-900 focus:outline-none focus:border-amber-500">
+                </div>
+                <div>
+                    <label class="block font-bold text-slate-700 mb-1">등록 도메인 (비워두면 현재 도메인 자동 전송)</label>
+                    <input type="text" id="map-api-domain-input" onkeydown="if(event.key==='Enter') applyMapApiKey()" placeholder="예: localhost 또는 브이월드에 등록한 도메인" 
+                        class="w-full border border-slate-300 rounded-lg px-3 py-2 font-mono text-xs text-slate-900 focus:outline-none focus:border-amber-500">
+                </div>
+                <div class="flex justify-end space-x-2 pt-3 border-t border-slate-100">
+                    <button type="button" onclick="closeApiKeyModal()" class="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 font-semibold text-slate-700">취소</button>
+                    <button type="button" onclick="applyMapApiKey()" class="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 font-semibold text-white shadow-sm">
+                        <i class="fa-solid fa-check mr-1"></i>확인 및 저장
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 브이월드 API 응답 원본 진단 모달 -->
+    <div id="vworld-diag-modal" class="hidden fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden border border-slate-200">
+            <div class="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between">
+                <div class="flex items-center space-x-2">
+                    <i class="fa-solid fa-stethoscope text-emerald-400"></i>
+                    <h3 class="font-bold text-sm">브이월드 연속지적도 API 호출·응답 진단</h3>
+                </div>
+                <button type="button" onclick="closeVworldDiagModal()" class="text-slate-400 hover:text-white p-1">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div class="p-4 space-y-3 text-xs text-slate-700">
+                <p class="text-[11px] text-slate-500 leading-relaxed">
+                    브이월드 서버가 반환한 최근 응답 원본입니다. <strong>INCORRECT_KEY / INVALID_DOMAIN</strong>이 표시되면 브이월드 인증키 설정의 서비스 URL(도메인)을 확인하시고, 네트워크 차단이 지속되면 상단 <strong>[지적도 SHP(.zip)]</strong>으로 오프라인 즉시 매칭이 가능합니다.
+                </p>
+                <pre id="vworld-diag-output" class="bg-slate-900 text-emerald-300 p-3 rounded-lg text-[11px] font-mono max-h-64 overflow-auto whitespace-pre-wrap break-all">아직 호출 기록이 없습니다.</pre>
+                <div class="flex justify-end">
+                    <button type="button" onclick="closeVworldDiagModal()" class="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold">닫기</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- CAD 사업구간(DXF) 위치/스케일/회전 정밀 보정 모달 -->
+    <div id="cad-align-modal" class="hidden fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 flex items-center justify-center p-4 pointer-events-auto">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-purple-200">
+            <div class="bg-purple-900 text-white px-5 py-3 flex items-center justify-between">
+                <div class="flex items-center space-x-2">
+                    <i class="fa-solid fa-compass-drafting text-purple-300"></i>
+                    <h3 class="font-bold text-sm">CAD 도면 위치·스케일·회전 보정</h3>
+                </div>
+                <button type="button" onclick="closeCadAlignModal()" class="text-purple-200 hover:text-white p-1">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div class="p-4 space-y-3 text-xs text-slate-700">
+                <div class="bg-purple-50 border border-purple-200 rounded-lg p-2.5 space-y-2">
+                    <div class="font-bold text-purple-950">1. 지도 위 기준점 클릭 정밀 맞춤</div>
+                    <p class="text-[11px] text-purple-800 leading-relaxed">
+                        CAD 도면의 기준 모서리와 실제 지적도 위 동일 지점을 클릭하면 위치·축척·회전이 자동 계산됩니다.
+                    </p>
+                    <div class="grid grid-cols-2 gap-1.5">
+                        <button type="button" onclick="startTwoPointCadAlign()" class="bg-purple-700 hover:bg-purple-600 text-white font-bold py-2 px-2 rounded-lg transition text-[11px]">
+                            2점 기준점 (위치+스케일)
+                        </button>
+                        <button type="button" onclick="startOnePointCadShift()" class="bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-2 px-2 rounded-lg transition text-[11px]">
+                            1점 기준점 (평행이동)
+                        </button>
+                    </div>
+                </div>
+
+                <div class="space-y-2 border-t border-slate-100 pt-2.5">
+                    <div class="font-bold text-slate-800">2. 수치 미세 조정 (이동 · 배율 · 회전)</div>
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-[10px] font-semibold text-slate-500 mb-0.5">동서 이동 (m)</label>
+                            <input type="number" id="cad-offset-x" step="1" onchange="applyManualCadTransform()" class="w-full border border-slate-300 rounded px-2 py-1 font-mono text-xs">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-semibold text-slate-500 mb-0.5">남북 이동 (m)</label>
+                            <input type="number" id="cad-offset-y" step="1" onchange="applyManualCadTransform()" class="w-full border border-slate-300 rounded px-2 py-1 font-mono text-xs">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-semibold text-slate-500 mb-0.5">배율 (Scale)</label>
+                            <input type="number" id="cad-scale-input" step="0.01" onchange="applyManualCadTransform()" class="w-full border border-slate-300 rounded px-2 py-1 font-mono text-xs">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-semibold text-slate-500 mb-0.5">회전 각도 (도 °)</label>
+                            <input type="number" id="cad-rot-input" step="0.5" onchange="applyManualCadTransform()" class="w-full border border-slate-300 rounded px-2 py-1 font-mono text-xs">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-center pt-2 border-t border-slate-100">
+                    <button type="button" onclick="autoSnapCadToCadastralParcels(true)" class="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-semibold border border-emerald-200">
+                        지적도 자동 맞춤 실행
+                    </button>
+                    <button type="button" onclick="closeCadAlignModal()" class="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold">완료</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- CAD 사업구간 명칭 확인 및 수정 모달 -->
+    <div id="cad-rename-modal" class="hidden fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden border border-purple-200">
+            <div class="bg-purple-900 text-white px-5 py-3 flex items-center justify-between">
+                <div class="flex items-center space-x-2">
+                    <i class="fa-solid fa-tag text-purple-300"></i>
+                    <h3 class="font-bold text-sm">CAD 해치별 사업구간 명칭 편집</h3>
+                </div>
+                <button type="button" onclick="closeCadRenameModal()" class="text-purple-200 hover:text-white p-1">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div class="p-4 space-y-3 text-xs text-slate-700">
+                <p class="text-[11px] text-slate-500">
+                    해치 경계 내부의 CAD 문자(`TEXT`/`MTEXT`)에서 자동 매칭된 구간명입니다. 수정 후 저장하면 지도와 엑셀 열에 즉시 반영됩니다.
+                </p>
+                <div id="cad-rename-list" class="max-h-72 overflow-y-auto space-y-1.5 pr-1"></div>
+                <div class="flex justify-end space-x-2 pt-2 border-t border-slate-100">
+                    <button type="button" onclick="closeCadRenameModal()" class="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 font-semibold text-slate-700">취소</button>
+                    <button type="button" onclick="saveCadZoneNames()" class="px-4 py-1.5 rounded-lg bg-purple-700 hover:bg-purple-600 font-semibold text-white">적용하기</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 알림 토스트 -->
+    <div id="toast" class="fixed bottom-5 right-5 z-50 bg-slate-900 text-white text-xs font-medium px-4 py-3 rounded-xl shadow-2xl border border-slate-700 transform translate-y-20 opacity-0 transition-all duration-300 flex items-center space-x-2">
+        <i class="fa-solid fa-circle-info text-blue-400"></i>
+        <span id="toast-msg">알림 메시지</span>
+    </div>
+
+    <script>
+        // 한국 측량 좌표계 정의 (Proj4js)
+        if (typeof proj4 !== 'undefined') {
+            proj4.defs("EPSG:5186", "+proj=tmerc +lat_0=38 +lon_0=127 +k=1 +x_0=200000 +y_0=600000 +ellps=GRS80 +units=m +no_defs");
+            proj4.defs("EPSG:5174", "+proj=tmerc +lat_0=38 +lon_0=127.0028902777778 +k=1 +x_0=200000 +y_0=500000 +ellps=bessel +units=m +no_defs +towgs84=-115.80,474.99,674.11,1.16,-2.31,-1.63,6.43");
+            proj4.defs("EPSG:5179", "+proj=tmerc +lat_0=38 +lon_0=127.5 +k=0.9996 +x_0=1000000 +y_0=2000000 +ellps=GRS80 +units=m +no_defs");
+        }
+
+        // 전역 상태 관리 변수
+        let savedVworldApiKey = "";
+        let savedVworldDomain = "";
+        let lastVworldApiLog = "아직 호출 기록이 없습니다.";
+
+        let map;
+        let baseLayers = {};
+        let vworldCadastralTileLayer = null;
+        let parcelLayerGroup = L.layerGroup();
+        let labelLayerGroup = L.layerGroup();
+        let cadZoneLayerGroup = L.layerGroup();
+        let cadLabelLayerGroup = L.layerGroup();
+        const canvasRenderer = L.canvas({ padding: 0.5 });
+
+        let workbookObj = null;
+        let rawSheetMatrix = [];
+        let excelHeaders = [];
+        let excelRows = [];
+        let hiddenExcelColumns = new Set();
+        let excelColumnWidths = {};
+        let currentUploadedFileName = '창릉지구_지번조서.xlsx';
+        let hasUnsavedEdits = false;
+        let hasLocalShpLoaded = false;
+
+        let mappedParcels = [];
+        let filteredParcels = [];
+        let vworldParcelCache = {};
+        let vworldFailedCache = new Set();
+        let isVworldSyncRunning = false;
+        let vworldSyncAbortRequested = false;
+
+        let selectedParcelIdx = null;
+        let multiSelectedParcelIndices = new Set();
+        let lastClickedFilteredPos = null;
+        let currentMatchFilter = 'all';
+        let currentCadFilter = 'all';
+        let renderedRowCount = 0;
+
+        // 범례 스타일 관리 (색상, 불투명도, 표시여부)
+        let legendStyleMap = {};
+        let activePopoverLegendKey = null;
+
+        // CAD(DXF) 사업구간 상태
+        let cadRawPolygons = [];
+        let cadTransformState = {
+            mode: 'AUTO',
+            originCadX: 0,
+            originCadY: 0,
+            originLng: 126.8732,
+            originLat: 37.6385,
+            scale: 1.0,
+            rotationRad: 0
+        };
+        let cadAlignMode = null; // '2pt' | '1pt'
+        let cadAlignClicks = [];
+
+        const CHANGNEUNG_CENTER = [37.6385, 126.8732];
+
+        // 고양시 덕양구 법정동 코드 매핑 (19자리 PNU 조립용)
+        const BEOPJEONGDONG_CODE_MAP = {
+            "주교동": "4128110100", "원당동": "4128110200", "신원동": "4128110300",
+            "원흥동": "4128110400", "도내동": "4128110500", "성사동": "4128110600",
+            "북한동": "4128110700", "효자동": "4128110800", "지축동": "4128110900",
+            "오금동": "4128111000", "삼송동": "4128111100", "동산동": "4128111200",
+            "용두동": "4128111300", "벽제동": "4128111400", "선유동": "4128111500",
+            "고양동": "4128111600", "대자동": "4128111700", "관산동": "4128111800",
+            "내유동": "4128111900", "토당동": "4128112000", "내곡동": "4128112100",
+            "대장동": "4128112200", "화정동": "4128112300", "강매동": "4128112400",
+            "행주내동": "4128112500", "행주외동": "4128112600", "신평동": "4128112700",
+            "행신동": "4128112800", "화전동": "4128112900", "현천동": "4128113000",
+            "덕은동": "4128113100", "향동동": "4128113200"
+        };
+
+        const COLOR_PALETTE = [
+            "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6",
+            "#ec4899", "#06b6d4", "#84cc16", "#f97316", "#6366f1",
+            "#14b8a6", "#eab308", "#a855f7", "#0ea5e9", "#22c55e"
+        ];
+
+        window.onload = function() {
+            initMap();
+            initSidebarResizer();
+        };
+
+        /**
+         * 좌측 사이드바 전체 너비 드래그 조절 기능
+         */
+        function initSidebarResizer() {
+            const resizer = document.getElementById('sidebar-resizer');
+            const sidebar = document.getElementById('left-sidebar');
+            if (!resizer || !sidebar) return;
+
+            let isResizing = false;
+            let startX = 0;
+            let startWidth = 400;
+
+            resizer.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                startX = e.clientX;
+                startWidth = sidebar.getBoundingClientRect().width;
+                resizer.classList.add('resizing');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+            });
+
+            window.addEventListener('mousemove', (e) => {
+                if (!isResizing) return;
+                const dx = e.clientX - startX;
+                const maxW = Math.min(window.innerWidth - 220, 1100);
+                const newW = Math.max(300, Math.min(maxW, startWidth + dx));
+                sidebar.style.width = `${newW}px`;
+                if (map) map.invalidateSize({ animate: false });
+            });
+
+            window.addEventListener('mouseup', () => {
+                if (!isResizing) return;
+                isResizing = false;
+                resizer.classList.remove('resizing');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                if (map) map.invalidateSize();
+            });
+        }
+
+        function initMap() {
+            map = L.map('map', {
+                center: CHANGNEUNG_CENTER,
+                zoom: 15,
+                zoomControl: false,
+                preferCanvas: true
+            });
+
+            L.control.zoom({ position: 'topright' }).addTo(map);
+
+            baseLayers.osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 20,
+                attribution: '&copy; OpenStreetMap',
+                errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+            }).addTo(map);
+
+            baseLayers.sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                maxZoom: 20,
+                attribution: '&copy; Esri WorldImagery',
+                errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+            });
+
+            parcelLayerGroup.addTo(map);
+            cadZoneLayerGroup.addTo(map);
+            labelLayerGroup.addTo(map);
+            cadLabelLayerGroup.addTo(map);
+
+            map.on('mousemove', (e) => {
+                document.getElementById('cursor-coords').textContent = `${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
+            });
+
+            map.on('moveend zoomend', () => {
+                updateViewportLabels();
+            });
+
+            map.on('click', (e) => {
+                if (cadAlignMode) {
+                    handleCadAlignMapClick(e.latlng);
+                }
+            });
+        }
+
+        function configureVworldBaseLayers(apiKey) {
+            if (!apiKey) return;
+            const domainParam = savedVworldDomain || window.location.hostname || 'localhost';
+            // 브이월드 일반 배경지도 (WMTS Base)
+            baseLayers.vworld = L.tileLayer(
+                `https://api.vworld.kr/req/wmts/1.0.0/${encodeURIComponent(apiKey)}/Base/{z}/{y}/{x}.png?domain=${encodeURIComponent(domainParam)}`,
+                {
+                    minZoom: 6,
+                    maxZoom: 19,
+                    attribution: '&copy; 국토교통부 VWorld',
+                    errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+                }
+            );
+            // 브이월드 위성 + 하이브리드 지도
+            baseLayers.vworldSat = L.layerGroup([
+                L.tileLayer(
+                    `https://api.vworld.kr/req/wmts/1.0.0/${encodeURIComponent(apiKey)}/Satellite/{z}/{y}/{x}.jpeg?domain=${encodeURIComponent(domainParam)}`,
+                    { minZoom: 6, maxZoom: 19, errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7' }
+                ),
+                L.tileLayer(
+                    `https://api.vworld.kr/req/wmts/1.0.0/${encodeURIComponent(apiKey)}/Hybrid/{z}/{y}/{x}.png?domain=${encodeURIComponent(domainParam)}`,
+                    { minZoom: 6, maxZoom: 19, errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7' }
+                )
+            ]);
+        }
+
+        function setBaseMap(type) {
+            Object.values(baseLayers).forEach(layer => {
+                if (layer && map.hasLayer(layer)) map.removeLayer(layer);
+            });
+            ['btn-base-vworld', 'btn-base-osm', 'btn-base-sat', 'btn-base-none'].forEach(id => {
+                const btn = document.getElementById(id);
+                if (!btn) return;
+                btn.classList.remove('bg-blue-600', 'text-white');
+                btn.classList.add('hover:bg-slate-100', 'text-slate-700');
+            });
+
+            if (type === 'vworld') {
+                if (!savedVworldApiKey) {
+                    showToast("브이월드 API 키를 먼저 입력해 주세요.");
+                    openApiKeyModal();
+                    setBaseMap('osm');
+                    return;
+                }
+                if (!baseLayers.vworld) configureVworldBaseLayers(savedVworldApiKey);
+                baseLayers.vworld.addTo(map);
+                const b = document.getElementById('btn-base-vworld');
+                b.classList.add('bg-blue-600', 'text-white');
+                b.classList.remove('hover:bg-slate-100', 'text-slate-700');
+            } else if (type === 'osm') {
+                baseLayers.osm.addTo(map);
+                const b = document.getElementById('btn-base-osm');
+                b.classList.add('bg-blue-600', 'text-white');
+                b.classList.remove('hover:bg-slate-100', 'text-slate-700');
+            } else if (type === 'sat') {
+                if (savedVworldApiKey && baseLayers.vworldSat) {
+                    baseLayers.vworldSat.addTo(map);
+                } else {
+                    baseLayers.sat.addTo(map);
+                }
+                const b = document.getElementById('btn-base-sat');
+                b.classList.add('bg-blue-600', 'text-white');
+                b.classList.remove('hover:bg-slate-100', 'text-slate-700');
+            } else {
+                const b = document.getElementById('btn-base-none');
+                b.classList.add('bg-blue-600', 'text-white');
+                b.classList.remove('hover:bg-slate-100', 'text-slate-700');
+            }
+        }
+
+        function toggleVworldCadastralTile(enabled) {
+            if (vworldCadastralTileLayer && map.hasLayer(vworldCadastralTileLayer)) {
+                map.removeLayer(vworldCadastralTileLayer);
+                vworldCadastralTileLayer = null;
+            }
+            if (!enabled) return;
+            if (!savedVworldApiKey) {
+                showToast("먼저 우측 상단 [브이월드 API 키]를 입력해 주세요.");
+                document.getElementById('toggle-cadastral-wmts').checked = false;
+                openApiKeyModal();
+                return;
+            }
+            const domainParam = savedVworldDomain || window.location.hostname || 'localhost';
+            // 연속지적도 오버레이 WMS
+            const cadastralOverlay = L.tileLayer.wms(`https://api.vworld.kr/req/wms?key=${encodeURIComponent(savedVworldApiKey)}&domain=${encodeURIComponent(domainParam)}`, {
+                layers: 'lp_pa_cbnd_bubun,lp_pa_cbnd_bonbun',
+                styles: 'lp_pa_cbnd_bubun,lp_pa_cbnd_bonbun',
+                format: 'image/png',
+                transparent: true,
+                version: '1.3.0',
+                crs: L.CRS.EPSG3857,
+                maxZoom: 20,
+                opacity: 0.85
+            });
+            vworldCadastralTileLayer = cadastralOverlay.addTo(map);
+        }
+
+        function toggleSidebar() {
+            const sidebar = document.getElementById('left-sidebar');
+            sidebar.classList.toggle('-translate-x-full');
+        }
+
+        // ==========================================
+        // 1. 브이월드 API 키 모달 및 응답 진단
+        // ==========================================
+        function openApiKeyModal() {
+            const host = window.location.hostname || 'localhost';
+            document.getElementById('detected-domain-display').textContent = host;
+            document.getElementById('map-api-key-input').value = savedVworldApiKey;
+            document.getElementById('map-api-domain-input').value = savedVworldDomain || host;
+            document.getElementById('apikey-modal').classList.remove('hidden');
+            setTimeout(() => document.getElementById('map-api-key-input').focus(), 50);
+        }
+
+        function closeApiKeyModal() {
+            document.getElementById('apikey-modal').classList.add('hidden');
+        }
+
+        function copyCurrentDomain() {
+            const text = document.getElementById('detected-domain-display').textContent;
+            const temp = document.createElement('textarea');
+            temp.value = text;
+            document.body.appendChild(temp);
+            temp.select();
+            document.execCommand('copy');
+            document.body.removeChild(temp);
+            showToast(`도메인 [${text}] 복사 완료`);
+        }
+
+        function applyMapApiKey() {
+            const key = document.getElementById('map-api-key-input').value.trim();
+            const domain = document.getElementById('map-api-domain-input').value.trim();
+            if (!key) {
+                showToast("브이월드 인증키를 입력해 주세요.");
+                return;
+            }
+            savedVworldApiKey = key;
+            savedVworldDomain = domain || window.location.hostname || 'localhost';
+            vworldFailedCache.clear();
+            configureVworldBaseLayers(savedVworldApiKey);
+            setBaseMap('vworld');
+            closeApiKeyModal();
+            document.getElementById('cadastral-status-text').textContent = "브이월드 API 연결됨 · [지적도 조회] 버튼을 눌러주세요";
+            updateSyncButtonState();
+            showToast("브이월드 API 키가 저장되고 배경지도가 브이월드 지도로 전환되었습니다.");
+        }
+
+        function openVworldDiagModal() {
+            document.getElementById('vworld-diag-output').textContent = lastVworldApiLog;
+            document.getElementById('vworld-diag-modal').classList.remove('hidden');
+        }
+
+        function closeVworldDiagModal() {
+            document.getElementById('vworld-diag-modal').classList.add('hidden');
+        }
+
+        // ==========================================
+        // 2. 엑셀 파일 파싱 & 스마트 헤더 인식
+        // ==========================================
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            currentUploadedFileName = file.name;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    workbookObj = XLSX.read(data, { type: 'array' });
+                    const sheetSelect = document.getElementById('sheet-select');
+                    sheetSelect.innerHTML = workbookObj.SheetNames.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+                    loadSheetData(workbookObj.SheetNames[0]);
+                    showToast(`[${file.name}] 로드 완료`);
+                } catch (err) {
+                    showToast("엑셀 파일을 읽는 중 오류가 발생했습니다: " + err.message);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+            event.target.value = '';
+        }
+
+        function loadSheetData(sheetName) {
+            if (!workbookObj || !sheetName) return;
+            const sheet = workbookObj.Sheets[sheetName];
+            rawSheetMatrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+            document.getElementById('header-row-select').value = 'auto';
+            hiddenExcelColumns.clear();
+            excelColumnWidths = {};
+            parseSheetWithSmartHeaders();
+
+            if (Array.isArray(sheet['!cols'])) {
+                excelHeaders.forEach((h, idx) => {
+                    const colInfo = sheet['!cols'][idx];
+                    if (!colInfo) return;
+                    if (colInfo.hidden) hiddenExcelColumns.add(h);
+                    if (colInfo.wpx) excelColumnWidths[h] = Math.max(50, Math.min(500, Math.round(colInfo.wpx)));
+                    else if (colInfo.wch) excelColumnWidths[h] = Math.max(50, Math.min(500, Math.round(colInfo.wch * 8)));
+                });
+            }
+
+            populateColumnDropdowns();
+            updateColumnManagerUI();
+            reprocessMapping();
+            if (savedVworldApiKey && excelRows.length > 0 && hasAnyExistingCache()) {
+                // 이미 캐시된 지적 정보가 있으면 즉시 매핑 반영
+                reprocessMapping();
+            }
+        }
+
+        function hasAnyExistingCache() {
+            return Object.keys(vworldParcelCache).length > 0;
+        }
+
+        function onHeaderRowChange() {
+            parseSheetWithSmartHeaders();
+            populateColumnDropdowns();
+            updateColumnManagerUI();
+            reprocessMapping();
+        }
+
+        function parseSheetWithSmartHeaders() {
+            if (!rawSheetMatrix || rawSheetMatrix.length === 0) {
+                excelHeaders = [];
+                excelRows = [];
+                return;
+            }
+            const mode = document.getElementById('header-row-select').value;
+            let headerIdx = 0;
+
+            if (mode === 'auto') {
+                let bestScore = -1;
+                const scanLimit = Math.min(10, rawSheetMatrix.length);
+                for (let r = 0; r < scanLimit; r++) {
+                    const row = rawSheetMatrix[r] || [];
+                    let nonEmpty = 0;
+                    let keywordHits = 0;
+                    row.forEach(cell => {
+                        const s = String(cell || '').trim();
+                        if (s) {
+                            nonEmpty++;
+                            if (/지번|본번|부번|동명|법정동|소재지|지목|면적|소유자|비고/.test(s)) keywordHits += 3;
+                        }
+                    });
+                    const score = nonEmpty + keywordHits;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        headerIdx = r;
+                    }
+                }
+            } else {
+                headerIdx = parseInt(mode, 10) || 0;
+            }
+
+            const rawHeaderRow = rawSheetMatrix[headerIdx] || [];
+            const usedNames = new Set();
+            excelHeaders = rawHeaderRow.map((h, i) => {
+                let name = String(h || '').trim() || `열_${i + 1}`;
+                let unique = name;
+                let suffix = 2;
+                while (usedNames.has(unique)) {
+                    unique = `${name}_${suffix++}`;
+                }
+                usedNames.add(unique);
+                return unique;
+            });
+
+            excelRows = [];
+            for (let r = headerIdx + 1; r < rawSheetMatrix.length; r++) {
+                const rowArr = rawSheetMatrix[r] || [];
+                const hasAnyVal = rowArr.some(v => String(v || '').trim() !== '');
+                if (!hasAnyVal) continue;
+                const obj = {};
+                excelHeaders.forEach((h, cIdx) => {
+                    obj[h] = rowArr[cIdx] !== undefined ? rowArr[cIdx] : '';
+                });
+                excelRows.push(obj);
+            }
+        }
+
+        function populateColumnDropdowns() {
+            const jibunSel = document.getElementById('col-jibun-select');
+            const colorSel = document.getElementById('col-color-select');
+            const bulkSel = document.getElementById('bulk-target-col');
+            const prevJibun = jibunSel.value;
+            const prevColor = colorSel.value;
+
+            const hasSplitCols = excelHeaders.some(h => /^(법정동|동|동명)$/.test(h)) && excelHeaders.some(h => /본번/.test(h));
+            let jibunOpts = `<option value="">자동 인식 (전체 행 스캔)</option>`;
+            if (hasSplitCols) {
+                jibunOpts += `<option value="__COMPOSITE_DONG_BON_BU__">★ [동 + 본번 + 부번] 자동 조합</option>`;
+            }
+            jibunOpts += excelHeaders.map(h => `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`).join('');
+            jibunSel.innerHTML = jibunOpts;
+
+            if (prevJibun && [...jibunSel.options].some(o => o.value === prevJibun)) {
+                jibunSel.value = prevJibun;
+            } else if (hasSplitCols) {
+                jibunSel.value = '__COMPOSITE_DONG_BON_BU__';
+            } else {
+                const foundJibun = excelHeaders.find(h => /지번|소재지|주소/.test(h));
+                if (foundJibun) jibunSel.value = foundJibun;
+            }
+
+            colorSel.innerHTML = `<option value="">단일 색상 표시</option>` +
+                excelHeaders.map(h => `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`).join('');
+            if (prevColor && excelHeaders.includes(prevColor)) {
+                colorSel.value = prevColor;
+            } else {
+                const foundColor = excelHeaders.find(h => /지목|구분|사업구간|현황|용도/.test(h));
+                if (foundColor) colorSel.value = foundColor;
+            }
+
+            if (bulkSel) {
+                bulkSel.innerHTML = excelHeaders.map(h => `<option value="${escapeHtml(h)}">${escapeHtml(h)}</option>`).join('') +
+                    `<option value="__NEW_COL__">+ 새 열 직접 생성...</option>`;
+            }
+            updateSyncButtonState();
+        }
+
+        function onJibunColumnChanged() {
+            updateSyncButtonState();
+            reprocessMapping();
+        }
+
+        function updateSyncButtonState() {
+            const btn = document.getElementById('btn-start-vworld-sync');
+            if (!btn) return;
+            btn.disabled = (excelRows.length === 0);
+        }
+
+        // ==========================================
+        // 3. 지번 정규화, 19자리 PNU 변환 & 매핑 처리
+        // ==========================================
+        function extractJibunFromRow(row, selectedCol) {
+            if (selectedCol === '__COMPOSITE_DONG_BON_BU__') {
+                const dongKey = excelHeaders.find(h => /^(법정동|동|동명)$/.test(h)) || excelHeaders.find(h => /동/.test(h));
+                const sanKey = excelHeaders.find(h => /산|대장/.test(h));
+                const bonKey = excelHeaders.find(h => /본번/.test(h));
+                const buKey = excelHeaders.find(h => /부번/.test(h));
+
+                const dong = String(row[dongKey] || '').trim();
+                const sanRaw = sanKey ? String(row[sanKey] || '').trim() : '';
+                const isSan = /산|2|임야/.test(sanRaw);
+                const bon = String(row[bonKey] || '').replace(/[^0-9]/g, '');
+                const bu = String(row[buKey] || '').replace(/[^0-9]/g, '');
+
+                if (dong && bon) {
+                    const prefix = isSan ? '산' : '';
+                    return `${dong} ${prefix}${parseInt(bon, 10)}${bu && parseInt(bu, 10) > 0 ? '-' + parseInt(bu, 10) : ''}`;
+                }
+            }
+
+            if (selectedCol && row[selectedCol] !== undefined) {
+                return normalizeJibunString(String(row[selectedCol]));
+            }
+
+            for (const h of excelHeaders) {
+                const val = String(row[h] || '').trim();
+                const norm = normalizeJibunString(val);
+                if (norm && /[가-힣]+동\s*(산)?\d+/.test(norm)) return norm;
+            }
+            return '';
+        }
+
+        function stripPrefixBeforeGu(addrStr) {
+            if (!addrStr) return '';
+            let s = String(addrStr).trim();
+            // "경기도 고양시 덕양구 용두동 102-94" -> "용두동 102-94"
+            s = s.replace(/^.*?(?:덕양구|일산동구|일산서구|고양시)\s+/, '');
+            return s.trim();
+        }
+
+        function normalizeJibunString(raw) {
+            if (!raw) return '';
+            let s = stripPrefixBeforeGu(raw);
+            // 끝의 지목 문자(전, 답, 대, 임, 도, 잡, 천 등) 제거
+            s = s.replace(/(\d)(?:전|답|대|임|도|잡|천|구|유|제|하|목|과|원|염|공|학|종|사|묘|창|장|철|수|양)$/g, '$1');
+            const m = s.match(/([가-힣]+동)\s*(산)?\s*(\d+)(?:\s*-\s*(\d+))?/);
+            if (m) {
+                const dong = m[1];
+                const san = m[2] ? '산' : '';
+                const bon = parseInt(m[3], 10);
+                const bu = m[4] ? parseInt(m[4], 10) : 0;
+                return `${dong} ${san}${bon}${bu > 0 ? '-' + bu : ''}`;
+            }
+            return s.trim();
+        }
+
+        function buildPnuFromNormJibun(normJibun) {
+            const m = normJibun.match(/^([가-힣]+동)\s*(산)?(\d+)(?:-(\d+))?$/);
+            if (!m) return null;
+            const dongCode = BEOPJEONGDONG_CODE_MAP[m[1]];
+            if (!dongCode) return null;
+            const landType = m[2] === '산' ? '2' : '1';
+            const bon = String(parseInt(m[3], 10)).padStart(4, '0');
+            const bu = String(m[4] ? parseInt(m[4], 10) : 0).padStart(4, '0');
+            return `${dongCode}${landType}${bon}${bu}`;
+        }
+
+        function reprocessMapping() {
+            const emptyState = document.getElementById('empty-state');
+            const excelTable = document.getElementById('excel-table');
+
+            if (excelRows.length === 0) {
+                emptyState.classList.remove('hidden');
+                excelTable.classList.add('hidden');
+                document.getElementById('record-count-badge').textContent = '0 필지';
+                return;
+            }
+
+            emptyState.classList.add('hidden');
+            excelTable.classList.remove('hidden');
+
+            const selectedJibunCol = document.getElementById('col-jibun-select').value;
+            const selectedColorCol = document.getElementById('col-color-select').value;
+
+            const uniqueCategories = new Set();
+            excelRows.forEach(row => {
+                if (selectedColorCol) {
+                    const cat = String(row[selectedColorCol] || '미지정').trim() || '미지정';
+                    uniqueCategories.add(cat);
+                }
+            });
+
+            const categoryColorMap = {};
+            let colorIdx = 0;
+            uniqueCategories.forEach(cat => {
+                if (!legendStyleMap[cat]) {
+                    legendStyleMap[cat] = {
+                        color: COLOR_PALETTE[colorIdx % COLOR_PALETTE.length],
+                        opacity: 0.5,
+                        visible: true
+                    };
+                }
+                categoryColorMap[cat] = legendStyleMap[cat].color;
+                colorIdx++;
+            });
+
+            if (!selectedColorCol && !legendStyleMap['전체 필지']) {
+                legendStyleMap['전체 필지'] = { color: '#3b82f6', opacity: 0.5, visible: true };
+            }
+
+            let matchedCount = 0;
+            let unmatchedCount = 0;
+
+            mappedParcels = excelRows.map((row, idx) => {
+                const normJibun = extractJibunFromRow(row, selectedJibunCol);
+                // 정규화된 지번 또는 행 인덱스 기반 캐시 모두 탐색하여 매핑 유실 방지
+                const cached = (normJibun && vworldParcelCache[normJibun])
+                    ? vworldParcelCache[normJibun]
+                    : (vworldParcelCache[`__ROW_${idx}__`] || null);
+                const category = selectedColorCol ? (String(row[selectedColorCol] || '미지정').trim() || '미지정') : '전체 필지';
+                const styleObj = legendStyleMap[category] || { color: '#3b82f6', opacity: 0.5, visible: true };
+
+                let isMatched = false;
+                let rings = null;
+                let center = null;
+
+                if (cached && cached.rings && cached.rings.length > 0) {
+                    isMatched = true;
+                    rings = cached.rings;
+                    center = cached.center;
+                    if (normJibun && !normJibun.startsWith('(') && !vworldParcelCache[normJibun]) {
+                        vworldParcelCache[normJibun] = cached;
+                    }
+                    matchedCount++;
+                } else {
+                    unmatchedCount++;
+                }
+
+                const cadZoneName = center ? findCadZoneForLatLng(center[0], center[1]) : '';
+
+                return {
+                    idx,
+                    raw: row,
+                    normJibun: normJibun || `(지번미상 #${idx + 1})`,
+                    category,
+                    color: styleObj.color,
+                    fillOpacity: styleObj.opacity,
+                    visible: styleObj.visible,
+                    isMatched,
+                    rings,
+                    center,
+                    cadZoneName
+                };
+            });
+
+            document.getElementById('record-count-badge').textContent = `${mappedParcels.length} 필지 로드됨`;
+            document.getElementById('match-ok-count').textContent = `일치 ${matchedCount}`;
+            document.getElementById('match-fail-count').textContent = `미조회 ${unmatchedCount}`;
+
+            const btnExportUnmatched = document.getElementById('btn-export-unmatched');
+            if (unmatchedCount > 0 && matchedCount > 0) {
+                btnExportUnmatched.classList.remove('hidden');
+            } else {
+                btnExportUnmatched.classList.add('hidden');
+            }
+
+            renderLegend(selectedColorCol, [...uniqueCategories]);
+            filterAndRenderTable();
+            renderMapParcels();
+        }
+
+        // ==========================================
+        // 4. 브이월드 연속지적도 대량 논블로킹 조회
+        // ==========================================
+        async function triggerVworldSync() {
+            if (excelRows.length === 0) {
+                showToast("먼저 엑셀 파일을 첨부해 주세요.");
+                return;
+            }
+            if (!savedVworldApiKey) {
+                showToast("브이월드 API 키를 먼저 입력해 주세요.");
+                openApiKeyModal();
+                return;
+            }
+            if (isVworldSyncRunning) return;
+
+            reprocessMapping();
+
+            const targets = [];
+            const seen = new Set();
+            mappedParcels.forEach(p => {
+                if (!p.isMatched && p.normJibun && !p.normJibun.startsWith('(') && !seen.has(p.normJibun)) {
+                    seen.add(p.normJibun);
+                    targets.push(p.normJibun);
+                }
+            });
+
+            if (targets.length === 0) {
+                showToast("모든 지번이 이미 조회 완료되었습니다.");
+                return;
+            }
+
+            isVworldSyncRunning = true;
+            vworldSyncAbortRequested = false;
+            document.getElementById('btn-start-vworld-sync').disabled = true;
+            document.getElementById('btn-stop-vworld-sync').classList.remove('hidden');
+
+            let processed = 0;
+            let successNew = 0;
+            const total = targets.length;
+            const CONCURRENCY = 4;
+            let cursor = 0;
+
+            const updateProgressUI = () => {
+                document.getElementById('btn-start-vworld-text').textContent = `조회 중... (${processed}/${total}, 성공 ${successNew})`;
+                document.getElementById('cadastral-status-text').textContent = `브이월드 조회 진행: ${processed}/${total}건 (신규 ${successNew}건)`;
+            };
+            updateProgressUI();
+
+            async function worker() {
+                while (cursor < total && !vworldSyncAbortRequested) {
+                    const myIdx = cursor++;
+                    const jibun = targets[myIdx];
+                    const res = await fetchSingleVworldParcel(jibun);
+                    processed++;
+                    if (res) {
+                        vworldParcelCache[jibun] = res;
+                        successNew++;
+                    }
+                    if (processed % 8 === 0 || processed === total) {
+                        updateProgressUI();
+                        await new Promise(r => setTimeout(r, 15));
+                    }
+                }
+            }
+
+            const workers = Array.from({ length: CONCURRENCY }, () => worker());
+            await Promise.all(workers);
+
+            isVworldSyncRunning = false;
+            document.getElementById('btn-start-vworld-sync').disabled = false;
+            document.getElementById('btn-stop-vworld-sync').classList.add('hidden');
+            document.getElementById('btn-start-vworld-text').textContent = "선택한 지번 열로 브이월드 지적도 조회";
+            document.getElementById('cadastral-status-text').textContent =
+                `조회 완료: 총 ${total}건 중 신규 ${successNew}건 매핑 성공`;
+
+            reprocessMapping();
+            if (successNew > 0) {
+                fitAllParcels();
+                if (cadRawPolygons.length > 0 && cadTransformState.mode === 'AUTO') {
+                    autoSnapCadToCadastralParcels(false);
+                }
+            }
+            showToast(`브이월드 지적도 조회 완료 (신규 ${successNew}건 매핑)`);
+        }
+
+        function stopVworldSync() {
+            vworldSyncAbortRequested = true;
+            showToast("조회를 중지했습니다. 현재까지 매핑된 결과를 반영합니다.");
+        }
+
+        function fetchSingleVworldParcel(normJibun) {
+            return new Promise((resolve) => {
+                const pnu = buildPnuFromNormJibun(normJibun);
+                const domainParam = savedVworldDomain || window.location.hostname || 'localhost';
+                const attrFilter = pnu
+                    ? `pnu:=:${pnu}`
+                    : `addr:like:%${normJibun}%`;
+
+                const cbName = `vw_cb_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+                const script = document.createElement('script');
+                let settled = false;
+
+                const cleanup = () => {
+                    try { delete window[cbName]; } catch (_) { window[cbName] = undefined; }
+                    if (script.parentNode) script.parentNode.removeChild(script);
+                };
+
+                const timer = setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    cleanup();
+                    lastVworldApiLog = `[요청지번] ${normJibun} (PNU: ${pnu || '없음'})\n-> 타임아웃(4.5초 초과)`;
+                    resolve(null);
+                }, 4500);
+
+                window[cbName] = function(data) {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    cleanup();
+
+                    lastVworldApiLog = `[요청지번] ${normJibun} (PNU: ${pnu || '없음'})\n` + JSON.stringify(data, null, 2).slice(0, 1200);
+
+                    const features = data?.response?.result?.featureCollection?.features;
+                    if (Array.isArray(features) && features.length > 0) {
+                        const geom = features[0].geometry;
+                        const rings = extractLeafletRingsFromGeoJson(geom);
+                        if (rings.length > 0) {
+                            const center = computeRingsCenter(rings);
+                            resolve({ rings, center, props: features[0].properties || {} });
+                            return;
+                        }
+                    }
+                    resolve(null);
+                };
+
+                script.onerror = function() {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    cleanup();
+                    lastVworldApiLog = `[요청지번] ${normJibun}\n-> 네트워크/JSONP 호출 실패 (브이월드 스크립트 로드 차단 또는 도메인 불일치)`;
+                    resolve(null);
+                };
+
+                const url = `https://api.vworld.kr/req/data?service=data&request=GetFeature&data=LP_PA_CBND_BUBUN&key=${encodeURIComponent(savedVworldApiKey)}&domain=${encodeURIComponent(domainParam)}&format=json&size=1&geometry=true&crs=EPSG:4326&attrFilter=${encodeURIComponent(attrFilter)}&callback=${cbName}`;
+                script.src = url;
+                document.head.appendChild(script);
+            });
+        }
+
+        // ==========================================
+        // 5. 로컬 연속지적도 SHP(.zip) / GeoJSON 오프라인 병합
+        // ==========================================
+        async function handleLocalShpUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            showToast(`[${file.name}] 연속지적도 파싱 중...`);
+
+            try {
+                let geojson;
+                if (file.name.toLowerCase().endsWith('.zip')) {
+                    const buf = await file.arrayBuffer();
+                    geojson = await shp(buf);
+                } else {
+                    const text = await file.text();
+                    geojson = JSON.parse(text);
+                }
+
+                const collections = Array.isArray(geojson) ? geojson : [geojson];
+                let addedCount = 0;
+
+                collections.forEach(fc => {
+                    const feats = fc?.features || [];
+                    feats.forEach(f => {
+                        const props = f.properties || {};
+                        const rawAddr = props.addr || props.ADDR || props.A2 || props.JIBUN || props.jibun || '';
+                        const pnu = String(props.pnu || props.PNU || props.A1 || '').trim();
+                        let norm = normalizeJibunString(rawAddr);
+
+                        if (!norm && pnu.length === 19) {
+                            const dongCode = pnu.slice(0, 10);
+                            const dongName = Object.keys(BEOPJEONGDONG_CODE_MAP).find(k => BEOPJEONGDONG_CODE_MAP[k] === dongCode);
+                            if (dongName) {
+                                const isSan = pnu[10] === '2' ? '산' : '';
+                                const bon = parseInt(pnu.slice(11, 15), 10);
+                                const bu = parseInt(pnu.slice(15, 19), 10);
+                                norm = `${dongName} ${isSan}${bon}${bu > 0 ? '-' + bu : ''}`;
+                            }
+                        }
+
+                        if (norm && f.geometry) {
+                            const rings = extractLeafletRingsFromGeoJson(f.geometry);
+                            if (rings.length > 0) {
+                                vworldParcelCache[norm] = {
+                                    rings,
+                                    center: computeRingsCenter(rings),
+                                    props
+                                };
+                                addedCount++;
+                            }
+                        }
+                    });
+                });
+
+                hasLocalShpLoaded = true;
+                document.getElementById('cadastral-status-text').textContent = `로컬 지적도 ${addedCount}필지 로드됨`;
+                reprocessMapping();
+                fitAllParcels();
+                if (cadRawPolygons.length > 0 && cadTransformState.mode === 'AUTO') {
+                    autoSnapCadToCadastralParcels(false);
+                }
+                showToast(`로컬 지적도에서 ${addedCount}개 필지를 병합했습니다.`);
+            } catch (err) {
+                showToast("SHP/GeoJSON 파싱 오류: " + err.message);
+            }
+            event.target.value = '';
+        }
+
+        function extractLeafletRingsFromGeoJson(geom) {
+            const rings = [];
+            if (!geom) return rings;
+            if (geom.type === 'Polygon') {
+                (geom.coordinates || []).forEach(ring => {
+                    rings.push(ring.map(pt => [pt[1], pt[0]]));
+                });
+            } else if (geom.type === 'MultiPolygon') {
+                (geom.coordinates || []).forEach(poly => {
+                    (poly || []).forEach(ring => {
+                        rings.push(ring.map(pt => [pt[1], pt[0]]));
+                    });
+                });
+            }
+            return rings;
+        }
+
+        function computeRingsCenter(rings) {
+            let sumLat = 0, sumLng = 0, cnt = 0;
+            const outer = rings[0] || [];
+            outer.forEach(pt => {
+                sumLat += pt[0];
+                sumLng += pt[1];
+                cnt++;
+            });
+            return cnt > 0 ? [sumLat / cnt, sumLng / cnt] : CHANGNEUNG_CENTER;
+        }
+
+        // ==========================================
+        // 6. 범례(Legend) 및 개별 색상/투명도/보기끄기 + Shift+클릭
+        // ==========================================
+        function renderLegend(colorCol, categories) {
+            const legendBox = document.getElementById('map-legend');
+            const itemsEl = document.getElementById('legend-items');
+            const titleEl = document.getElementById('legend-title');
+
+            if (mappedParcels.length === 0) {
+                legendBox.classList.add('hidden');
+                return;
+            }
+            legendBox.classList.remove('hidden');
+            titleEl.textContent = colorCol ? `범례: ${colorCol}` : '범례: 전체 필지';
+
+            const keys = colorCol && categories.length > 0 ? categories : ['전체 필지'];
+            const countMap = {};
+            mappedParcels.forEach(p => {
+                countMap[p.category] = (countMap[p.category] || 0) + 1;
+            });
+
+            itemsEl.innerHTML = keys.map(k => {
+                const st = legendStyleMap[k] || { color: '#3b82f6', opacity: 0.5, visible: true };
+                const cnt = countMap[k] || 0;
+                const safeK = escapeHtml(k);
+                const jsK = safeK.replace(/'/g, "\\'");
+                const opacityPct = Math.round(st.opacity * 100);
+                return `
+                    <div onclick="handleLegendItemClick(event, '${jsK}')" 
+                        class="flex items-center justify-between px-2 py-1 rounded-md cursor-pointer transition select-none ${st.visible ? 'hover:bg-slate-100 text-slate-800' : 'opacity-45 bg-slate-100 text-slate-400 line-through'}">
+                        <div class="flex items-center space-x-2 truncate pr-2">
+                            <span class="w-3 h-3 rounded-sm shrink-0 border border-slate-300" style="background-color: ${st.color}; opacity: ${Math.max(0.25, st.opacity)};"></span>
+                            <span class="truncate font-medium">${safeK}</span>
+                        </div>
+                        <div class="flex items-center space-x-1.5 shrink-0 text-[10px] text-slate-500 font-mono">
+                            <span>${opacityPct}%</span>
+                            <span class="bg-slate-100 px-1.5 py-0.2 rounded text-slate-700 font-bold">${cnt}</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function handleLegendItemClick(event, key) {
+            const allKeys = Object.keys(legendStyleMap);
+
+            // Shift + 클릭: 선택한 항목들만 단독/다중 표시 토글
+            if (event.shiftKey) {
+                const currentlyVisibleKeys = allKeys.filter(k => legendStyleMap[k].visible);
+                const isExclusiveMode = currentlyVisibleKeys.length < allKeys.length;
+
+                if (!isExclusiveMode) {
+                    // 전체가 켜져 있던 상태면 클릭한 항목만 남기고 나머지 끄기
+                    allKeys.forEach(k => {
+                        legendStyleMap[k].visible = (k === key);
+                    });
+                } else {
+                    // 이미 단독/다중 필터 상태면 해당 항목만 토글
+                    legendStyleMap[key].visible = !legendStyleMap[key].visible;
+                    // 만약 전부 꺼지게 되면 다시 전체 켜기
+                    if (!allKeys.some(k => legendStyleMap[k].visible)) {
+                        allKeys.forEach(k => legendStyleMap[k].visible = true);
+                    }
+                }
+                syncParcelsWithLegendStyles();
+                return;
+            }
+
+            // 일반 클릭: 해당 항목의 색상/투명도/보기끄기 설정 팝오버 열기
+            activePopoverLegendKey = key;
+            const st = legendStyleMap[key] || { color: '#3b82f6', opacity: 0.5, visible: true };
+            document.getElementById('popover-item-name').textContent = key;
+            document.getElementById('popover-color-input').value = st.color;
+            document.getElementById('popover-visible-input').checked = st.visible;
+            const pct = Math.round(st.opacity * 100);
+            document.getElementById('popover-opacity-input').value = pct;
+            document.getElementById('popover-opacity-label').textContent = `${pct}%`;
+            document.getElementById('legend-item-popover').classList.remove('hidden');
+        }
+
+        function closeLegendPopover() {
+            activePopoverLegendKey = null;
+            document.getElementById('legend-item-popover').classList.add('hidden');
+        }
+
+        function onLegendColorChange(newColor) {
+            if (!activePopoverLegendKey || !legendStyleMap[activePopoverLegendKey]) return;
+            legendStyleMap[activePopoverLegendKey].color = newColor;
+            syncParcelsWithLegendStyles();
+        }
+
+        function onLegendVisibleChange(isVisible) {
+            if (!activePopoverLegendKey || !legendStyleMap[activePopoverLegendKey]) return;
+            legendStyleMap[activePopoverLegendKey].visible = isVisible;
+            syncParcelsWithLegendStyles();
+        }
+
+        function onLegendOpacityChange(pctVal) {
+            if (!activePopoverLegendKey || !legendStyleMap[activePopoverLegendKey]) return;
+            const op = parseInt(pctVal, 10) / 100;
+            legendStyleMap[activePopoverLegendKey].opacity = op;
+            document.getElementById('popover-opacity-label').textContent = `${pctVal}%`;
+            syncParcelsWithLegendStyles();
+        }
+
+        function resetAllLegendStyles() {
+            Object.keys(legendStyleMap).forEach(k => {
+                legendStyleMap[k].visible = true;
+                legendStyleMap[k].opacity = 0.5;
+            });
+            closeLegendPopover();
+            syncParcelsWithLegendStyles();
+            showToast("모든 범례 항목 표시 및 투명도를 초기화했습니다.");
+        }
+
+        function syncParcelsWithLegendStyles() {
+            const colorCol = document.getElementById('col-color-select').value;
+            const keys = Object.keys(legendStyleMap);
+            mappedParcels.forEach(p => {
+                const st = legendStyleMap[p.category] || { color: '#3b82f6', opacity: 0.5, visible: true };
+                p.color = st.color;
+                p.fillOpacity = st.opacity;
+                p.visible = st.visible;
+            });
+            renderLegend(colorCol, keys);
+            renderMapParcels();
+        }
+
+        // ==========================================
+        // 7. 지도 필지 렌더링 & 지번 라벨
+        // ==========================================
+        function renderMapParcels() {
+            parcelLayerGroup.clearLayers();
+
+            mappedParcels.forEach(p => {
+                if (!p.isMatched || !p.rings || !p.visible) return;
+                const isSelected = (selectedParcelIdx === p.idx);
+                const isMulti = multiSelectedParcelIndices.has(p.idx);
+
+                const poly = L.polygon(p.rings, {
+                    renderer: canvasRenderer,
+                    color: isSelected ? '#dc2626' : (isMulti ? '#4f46e5' : p.color),
+                    weight: isSelected ? 3 : (isMulti ? 2.5 : 1.3),
+                    fillColor: p.color,
+                    fillOpacity: isSelected ? Math.min(0.85, p.fillOpacity + 0.25) : p.fillOpacity
+                });
+
+                poly.on('click', (e) => {
+                    L.DomEvent.stopPropagation(e);
+                    if (cadAlignMode) {
+                        handleCadAlignMapClick(e.latlng);
+                        return;
+                    }
+                    selectParcel(p.idx, false);
+                });
+
+                poly.bindTooltip(`<strong>${escapeHtml(p.normJibun)}</strong>${p.cadZoneName ? `<br><span style="color:#6d28d9;">구간: ${escapeHtml(p.cadZoneName)}</span>` : ''}`, {
+                    sticky: true,
+                    direction: 'top'
+                });
+
+                poly.addTo(parcelLayerGroup);
+            });
+
+            updateViewportLabels();
+        }
+
+        function updateViewportLabels() {
+            labelLayerGroup.clearLayers();
+            const showLabels = document.getElementById('toggle-labels')?.checked;
+            if (!showLabels || !map) return;
+
+            const zoom = map.getZoom();
+            if (zoom < 16) return;
+
+            const bounds = map.getBounds();
+            let count = 0;
+            for (let i = 0; i < mappedParcels.length; i++) {
+                const p = mappedParcels[i];
+                if (!p.isMatched || !p.center || !p.visible) continue;
+                if (!bounds.contains(p.center)) continue;
+
+                const shortText = p.normJibun.replace(/^[가-힣]+동\s*/, '');
+                const marker = L.marker(p.center, {
+                    interactive: false,
+                    icon: L.divIcon({
+                        className: 'jibun-label',
+                        html: escapeHtml(shortText),
+                        iconSize: [60, 16],
+                        iconAnchor: [30, 8]
+                    })
+                });
+                marker.addTo(labelLayerGroup);
+                count++;
+                if (count >= 450) break;
+            }
+        }
+
+        function fitAllParcels() {
+            const pts = [];
+            mappedParcels.forEach(p => {
+                if (p.isMatched && p.center && p.visible) pts.push(p.center);
+            });
+            if (pts.length > 0) {
+                map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 18 });
+            } else {
+                map.setView(CHANGNEUNG_CENTER, 15);
+            }
+        }
+
+        // ==========================================
+        // 8. 좌측 테이블 렌더링, 열 너비 조절·숨김, 다중 선택 & 일괄 편집
+        // ==========================================
+        let filterDebounceTimer = null;
+        function debouncedFilterTable() {
+            clearTimeout(filterDebounceTimer);
+            filterDebounceTimer = setTimeout(filterAndRenderTable, 150);
+        }
+
+        function setMatchFilter(mode) {
+            currentMatchFilter = mode;
+            ['all', 'matched', 'unmatched'].forEach(m => {
+                const btn = document.getElementById(`filter-${m}`);
+                if (m === mode) {
+                    btn.classList.add('bg-slate-800', 'text-white', 'shadow-sm');
+                    btn.classList.remove('text-slate-600');
+                } else {
+                    btn.classList.remove('bg-slate-800', 'text-white', 'shadow-sm');
+                    btn.classList.add('text-slate-600');
+                }
+            });
+            filterAndRenderTable();
+        }
+
+        function filterAndRenderTable() {
+            const q = (document.getElementById('search-input')?.value || '').trim().toLowerCase();
+            filteredParcels = mappedParcels.filter(p => {
+                if (currentMatchFilter === 'matched' && !p.isMatched) return false;
+                if (currentMatchFilter === 'unmatched' && p.isMatched) return false;
+
+                if (currentCadFilter === 'in_any_zone' && !p.cadZoneName) return false;
+                if (currentCadFilter === 'outside_zone' && p.cadZoneName) return false;
+                if (currentCadFilter.startsWith('zone:')) {
+                    const targetZone = currentCadFilter.slice(5);
+                    const zones = p.cadZoneName ? p.cadZoneName.split(',').map(s => s.trim()) : [];
+                    if (!zones.includes(targetZone)) return false;
+                }
+
+                if (!q) return true;
+                if (p.normJibun.toLowerCase().includes(q)) return true;
+                return Object.values(p.raw).some(v => String(v || '').toLowerCase().includes(q));
+            });
+
+            const visibleHeaders = excelHeaders.filter(h => !hiddenExcelColumns.has(h));
+            const allFilteredSelected = filteredParcels.length > 0 && filteredParcels.every(p => multiSelectedParcelIndices.has(p.idx));
+            const thead = document.getElementById('excel-thead');
+            thead.innerHTML = `
+                <tr>
+                    <th style="width: 34px;" class="px-2 py-2 text-center">
+                        <input type="checkbox" ${allFilteredSelected ? 'checked' : ''} onchange="toggleSelectAllFiltered(this.checked)" class="rounded text-indigo-600 cursor-pointer" title="현재 목록 전체 선택/해제">
+                    </th>
+                    <th style="width: 52px;" class="px-2 py-2 font-bold text-slate-600">상태</th>
+                    ${visibleHeaders.map(h => {
+                        const w = excelColumnWidths[h] || 110;
+                        const safeH = escapeHtml(h);
+                        const jsH = safeH.replace(/'/g, "\\'");
+                        return `
+                            <th data-col-name="${safeH}" style="width: ${w}px; min-width: ${w}px; max-width: ${w}px;" class="relative px-2.5 py-2 font-bold text-slate-600 group select-none overflow-hidden text-ellipsis" title="${safeH} (경계 드래그: 너비조절 / 더블클릭: 자동맞춤)">
+                                <div class="flex items-center justify-between pr-1.5">
+                                    <span class="truncate">${safeH}</span>
+                                    <button type="button" onclick="hideExcelColumn('${jsH}', event)" class="hidden group-hover:inline-block text-slate-400 hover:text-rose-600 ml-1 shrink-0" title="이 열 숨기기 (수정본 엑셀 저장 시 숨김 반영)">
+                                        <i class="fa-solid fa-eye-slash text-[10px]"></i>
+                                    </button>
+                                </div>
+                                <div onmousedown="startColumnResize(event, '${jsH}')" ondblclick="autoFitColumnWidth('${jsH}', event)" class="col-resizer"></div>
+                            </th>
+                        `;
+                    }).join('')}
+                </tr>
+            `;
+
+            document.getElementById('excel-tbody').innerHTML = '';
+            renderedRowCount = 0;
+            appendTableRowsChunk();
+        }
+
+        function handleTableScroll() {
+            const container = document.getElementById('table-container');
+            if (container.scrollTop + container.clientHeight >= container.scrollHeight - 120) {
+                appendTableRowsChunk();
+            }
+        }
+
+        function appendTableRowsChunk() {
+            if (renderedRowCount >= filteredParcels.length) return;
+            const tbody = document.getElementById('excel-tbody');
+            const startPos = renderedRowCount;
+            const slice = filteredParcels.slice(startPos, startPos + 80);
+            const visibleHeaders = excelHeaders.filter(h => !hiddenExcelColumns.has(h));
+
+            const html = slice.map((p, offset) => {
+                const filteredPos = startPos + offset;
+                const isSelected = (selectedParcelIdx === p.idx);
+                const isMulti = multiSelectedParcelIndices.has(p.idx);
+                const badge = p.isMatched
+                    ? `<span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-bold text-[10px]">일치</span>`
+                    : `<span class="px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-bold text-[10px]">미조회</span>`;
+
+                const cells = visibleHeaders.map(h => {
+                    const val = p.raw[h] !== undefined ? p.raw[h] : '';
+                    const w = excelColumnWidths[h] || 110;
+                    return `<td ondblclick="enableInlineCellEdit(event, ${p.idx}, '${escapeHtml(h).replace(/'/g, "\\'")}')" style="width: ${w}px; min-width: ${w}px; max-width: ${w}px;" class="px-2.5 py-1.5 text-slate-700 truncate" title="${escapeHtml(val)} (더블클릭하여 수정)">${escapeHtml(val)}</td>`;
+                }).join('');
+
+                const rowClass = isMulti
+                    ? 'bg-indigo-100/80 hover:bg-indigo-100 font-medium'
+                    : (isSelected ? 'bg-blue-50 font-semibold' : (p.isMatched ? 'hover:bg-slate-50' : 'bg-rose-50/30 hover:bg-rose-50/60'));
+
+                return `
+                    <tr data-parcel-idx="${p.idx}" data-filtered-pos="${filteredPos}" onclick="handleTableRowClick(event, ${p.idx}, ${filteredPos})" class="cursor-pointer transition select-none ${rowClass}">
+                        <td style="width: 34px;" class="px-2 py-1.5 text-center" onclick="handleRowCheckboxClick(event, ${p.idx}, ${filteredPos})">
+                            <input type="checkbox" ${isMulti ? 'checked' : ''} class="rounded text-indigo-600 pointer-events-none">
+                        </td>
+                        <td style="width: 52px;" class="px-2 py-1.5">${badge}</td>
+                        ${cells}
+                    </tr>
+                `;
+            }).join('');
+
+            tbody.insertAdjacentHTML('beforeend', html);
+            renderedRowCount += slice.length;
+        }
+
+        // 엑셀 열 표시/숨기기 & 열 너비 조절 함수들
+        function toggleColumnManagerPanel() {
+            const panel = document.getElementById('column-manager-panel');
+            if (!panel) return;
+            panel.classList.toggle('hidden');
+            if (!panel.classList.contains('hidden')) {
+                updateColumnManagerUI();
+            }
+        }
+
+        function updateColumnManagerUI() {
+            const listEl = document.getElementById('column-manager-list');
+            const badgeEl = document.getElementById('hidden-col-badge');
+            if (badgeEl) {
+                if (hiddenExcelColumns.size > 0) {
+                    badgeEl.classList.remove('hidden');
+                    badgeEl.textContent = hiddenExcelColumns.size;
+                } else {
+                    badgeEl.classList.add('hidden');
+                }
+            }
+            if (!listEl) return;
+
+            listEl.innerHTML = excelHeaders.map(h => {
+                const isVisible = !hiddenExcelColumns.has(h);
+                const safeH = escapeHtml(h);
+                const jsH = safeH.replace(/'/g, "\\'");
+                const w = excelColumnWidths[h] || 110;
+                return `
+                    <label class="flex items-center justify-between bg-slate-700/70 hover:bg-slate-700 px-2 py-1 rounded cursor-pointer truncate">
+                        <div class="flex items-center space-x-1.5 truncate">
+                            <input type="checkbox" ${isVisible ? 'checked' : ''} onchange="toggleExcelColumnVisibility('${jsH}', this.checked)" class="rounded text-blue-500">
+                            <span class="truncate ${isVisible ? 'text-slate-100' : 'text-slate-400 line-through'}">${safeH}</span>
+                        </div>
+                        <span class="text-[9px] text-slate-400 font-mono ml-1 shrink-0">${w}px</span>
+                    </label>
+                `;
+            }).join('');
+        }
+
+        function toggleExcelColumnVisibility(colName, isVisible) {
+            if (isVisible) {
+                hiddenExcelColumns.delete(colName);
+            } else {
+                const visibleCount = excelHeaders.filter(h => !hiddenExcelColumns.has(h)).length;
+                if (visibleCount <= 1) {
+                    showToast("최소 1개 이상의 열은 표시되어야 합니다.");
+                    updateColumnManagerUI();
+                    return;
+                }
+                hiddenExcelColumns.add(colName);
+            }
+            hasUnsavedEdits = true;
+            document.getElementById('btn-export-modified').classList.remove('hidden');
+            updateColumnManagerUI();
+            filterAndRenderTable();
+        }
+
+        function hideExcelColumn(colName, event) {
+            if (event) event.stopPropagation();
+            toggleExcelColumnVisibility(colName, false);
+            showToast(`[${colName}] 열을 숨겼습니다. (상단 '열 관리'에서 다시 표시 가능)`);
+        }
+
+        function showAllExcelColumns() {
+            hiddenExcelColumns.clear();
+            hasUnsavedEdits = true;
+            document.getElementById('btn-export-modified').classList.remove('hidden');
+            updateColumnManagerUI();
+            filterAndRenderTable();
+            showToast("숨겨진 모든 열을 다시 표시했습니다.");
+        }
+
+        function resetAllColumnWidths() {
+            excelColumnWidths = {};
+            hasUnsavedEdits = true;
+            document.getElementById('btn-export-modified').classList.remove('hidden');
+            updateColumnManagerUI();
+            filterAndRenderTable();
+            showToast("모든 열 너비를 기본값으로 초기화했습니다.");
+        }
+
+        function startColumnResize(event, colName) {
+            event.stopPropagation();
+            event.preventDefault();
+            const startX = event.clientX;
+            const startWidth = excelColumnWidths[colName] || 110;
+
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+
+            const onMouseMove = (moveEvt) => {
+                const dx = moveEvt.clientX - startX;
+                const newWidth = Math.max(48, Math.min(520, Math.round(startWidth + dx)));
+                excelColumnWidths[colName] = newWidth;
+                applyLiveColumnWidthDom(colName, newWidth);
+            };
+
+            const onMouseUp = () => {
+                window.removeEventListener('mousemove', onMouseMove);
+                window.removeEventListener('mouseup', onMouseUp);
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                hasUnsavedEdits = true;
+                document.getElementById('btn-export-modified').classList.remove('hidden');
+                updateColumnManagerUI();
+            };
+
+            window.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('mouseup', onMouseUp);
+        }
+
+        function autoFitColumnWidth(colName, event) {
+            if (event) event.stopPropagation();
+            let maxChars = colName.length * 1.6;
+            const sampleLimit = Math.min(200, filteredParcels.length);
+            for (let i = 0; i < sampleLimit; i++) {
+                const val = String(filteredParcels[i].raw[colName] ?? '');
+                let len = 0;
+                for (let c = 0; c < val.length; c++) {
+                    len += val.charCodeAt(c) > 255 ? 1.7 : 1.0;
+                }
+                if (len > maxChars) maxChars = len;
+            }
+            const autoW = Math.max(60, Math.min(420, Math.round(maxChars * 7.5 + 24)));
+            excelColumnWidths[colName] = autoW;
+            applyLiveColumnWidthDom(colName, autoW);
+            hasUnsavedEdits = true;
+            document.getElementById('btn-export-modified').classList.remove('hidden');
+            updateColumnManagerUI();
+        }
+
+        function applyLiveColumnWidthDom(colName, widthPx) {
+            const visibleHeaders = excelHeaders.filter(h => !hiddenExcelColumns.has(h));
+            const visIdx = visibleHeaders.indexOf(colName);
+            if (visIdx === -1) return;
+            const domColIndex = visIdx + 3;
+            const th = document.querySelector(`#excel-thead th:nth-child(${domColIndex})`);
+            if (th) {
+                th.style.width = `${widthPx}px`;
+                th.style.minWidth = `${widthPx}px`;
+                th.style.maxWidth = `${widthPx}px`;
+            }
+            const tds = document.querySelectorAll(`#excel-tbody td:nth-child(${domColIndex})`);
+            tds.forEach(td => {
+                td.style.width = `${widthPx}px`;
+                td.style.minWidth = `${widthPx}px`;
+                td.style.maxWidth = `${widthPx}px`;
+            });
+        }
+
+        // 다중 선택(Shift+클릭, Ctrl+클릭, 체크박스) & 일괄 수정
+        function handleTableRowClick(event, parcelIdx, filteredPos) {
+            if (event.shiftKey && lastClickedFilteredPos !== null) {
+                const start = Math.min(lastClickedFilteredPos, filteredPos);
+                const end = Math.max(lastClickedFilteredPos, filteredPos);
+                for (let i = start; i <= end; i++) {
+                    if (filteredParcels[i]) {
+                        multiSelectedParcelIndices.add(filteredParcels[i].idx);
+                    }
+                }
+                updateBulkEditUI();
+                refreshVisibleTableSelectionStyles();
+                renderMapParcels();
+                return;
+            }
+
+            if (event.ctrlKey || event.metaKey) {
+                if (multiSelectedParcelIndices.has(parcelIdx)) {
+                    multiSelectedParcelIndices.delete(parcelIdx);
+                } else {
+                    multiSelectedParcelIndices.add(parcelIdx);
+                }
+                lastClickedFilteredPos = filteredPos;
+                updateBulkEditUI();
+                refreshVisibleTableSelectionStyles();
+                renderMapParcels();
+                return;
+            }
+
+            lastClickedFilteredPos = filteredPos;
+            selectParcel(parcelIdx, true);
+        }
+
+        function handleRowCheckboxClick(event, parcelIdx, filteredPos) {
+            event.stopPropagation();
+            if (event.shiftKey && lastClickedFilteredPos !== null) {
+                const start = Math.min(lastClickedFilteredPos, filteredPos);
+                const end = Math.max(lastClickedFilteredPos, filteredPos);
+                for (let i = start; i <= end; i++) {
+                    if (filteredParcels[i]) {
+                        multiSelectedParcelIndices.add(filteredParcels[i].idx);
+                    }
+                }
+            } else {
+                if (multiSelectedParcelIndices.has(parcelIdx)) {
+                    multiSelectedParcelIndices.delete(parcelIdx);
+                } else {
+                    multiSelectedParcelIndices.add(parcelIdx);
+                }
+                lastClickedFilteredPos = filteredPos;
+            }
+            updateBulkEditUI();
+            refreshVisibleTableSelectionStyles();
+            renderMapParcels();
+        }
+
+        function toggleSelectAllFiltered(checked) {
+            if (checked) {
+                filteredParcels.forEach(p => multiSelectedParcelIndices.add(p.idx));
+            } else {
+                filteredParcels.forEach(p => multiSelectedParcelIndices.delete(p.idx));
+            }
+            updateBulkEditUI();
+            refreshVisibleTableSelectionStyles();
+            renderMapParcels();
+        }
+
+        function selectAllFilteredParcels() {
+            filteredParcels.forEach(p => multiSelectedParcelIndices.add(p.idx));
+            updateBulkEditUI();
+            refreshVisibleTableSelectionStyles();
+            renderMapParcels();
+        }
+
+        function clearMultiSelection() {
+            multiSelectedParcelIndices.clear();
+            updateBulkEditUI();
+            refreshVisibleTableSelectionStyles();
+            renderMapParcels();
+        }
+
+        function updateBulkEditUI() {
+            const panel = document.getElementById('bulk-edit-panel');
+            const countEl = document.getElementById('bulk-selected-count');
+            if (!panel) return;
+            if (multiSelectedParcelIndices.size > 0) {
+                panel.classList.remove('hidden');
+                countEl.textContent = `${multiSelectedParcelIndices.size}개 필지 일괄 선택됨`;
+            } else {
+                panel.classList.add('hidden');
+            }
+        }
+
+        function refreshVisibleTableSelectionStyles() {
+            const rows = document.querySelectorAll('#excel-tbody tr[data-parcel-idx]');
+            rows.forEach(tr => {
+                const pIdx = parseInt(tr.getAttribute('data-parcel-idx'), 10);
+                const isMulti = multiSelectedParcelIndices.has(pIdx);
+                const cb = tr.querySelector('input[type="checkbox"]');
+                if (cb) cb.checked = isMulti;
+                if (isMulti) {
+                    tr.classList.add('bg-indigo-100/80', 'font-medium');
+                } else {
+                    tr.classList.remove('bg-indigo-100/80', 'font-medium');
+                }
+            });
+        }
+
+        function toggleBulkNewColInput() {
+            const sel = document.getElementById('bulk-target-col').value;
+            const wrap = document.getElementById('bulk-new-col-wrap');
+            if (sel === '__NEW_COL__') {
+                wrap.classList.remove('hidden');
+                document.getElementById('bulk-new-col-name').focus();
+            } else {
+                wrap.classList.add('hidden');
+            }
+        }
+
+        function onBulkEditModeChange() {
+            const mode = document.getElementById('bulk-edit-mode').value;
+            const valInput = document.getElementById('bulk-edit-value');
+            if (mode === 'clear') {
+                valInput.disabled = true;
+                valInput.placeholder = "선택한 필지의 해당 열 내용을 모두 비웁니다";
+            } else {
+                valInput.disabled = false;
+                valInput.placeholder = mode === 'set' ? "일괄 입력할 내용 (예: 1공구 사업지구)" : "추가할 텍스트 입력";
+            }
+        }
+
+        function applyBulkColumnEdit() {
+            if (multiSelectedParcelIndices.size === 0) return;
+            let targetCol = document.getElementById('bulk-target-col').value;
+            const mode = document.getElementById('bulk-edit-mode').value;
+            const inputVal = document.getElementById('bulk-edit-value').value;
+
+            if (targetCol === '__NEW_COL__') {
+                const newName = document.getElementById('bulk-new-col-name').value.trim();
+                if (!newName) {
+                    showToast("새로 생성할 열 이름을 입력해 주세요.");
+                    return;
+                }
+                targetCol = newName;
+                if (!excelHeaders.includes(targetCol)) {
+                    excelHeaders.push(targetCol);
+                    excelRows.forEach(r => r[targetCol] = '');
+                }
+            }
+
+            let updated = 0;
+            multiSelectedParcelIndices.forEach(pIdx => {
+                const row = excelRows[pIdx];
+                if (!row) return;
+                const prev = String(row[targetCol] ?? '');
+                if (mode === 'set') {
+                    row[targetCol] = inputVal;
+                } else if (mode === 'append') {
+                    row[targetCol] = prev ? `${prev} ${inputVal}` : inputVal;
+                } else if (mode === 'prepend') {
+                    row[targetCol] = prev ? `${inputVal} ${prev}` : inputVal;
+                } else if (mode === 'clear') {
+                    row[targetCol] = '';
+                }
+                updated++;
+            });
+
+            hasUnsavedEdits = true;
+            document.getElementById('btn-export-modified').classList.remove('hidden');
+            populateColumnDropdowns();
+            updateColumnManagerUI();
+            if (excelHeaders.includes(targetCol)) {
+                document.getElementById('bulk-target-col').value = targetCol;
+                toggleBulkNewColInput();
+            }
+
+            reprocessMapping();
+            refreshVisibleTableSelectionStyles();
+            showToast(`${updated}개 필지의 [${targetCol}] 열을 일괄 수정했습니다.`);
+        }
+
+        // 좌측 표 셀 더블클릭 인라인 편집
+        function enableInlineCellEdit(event, parcelIdx, colName) {
+            event.stopPropagation();
+            const td = event.currentTarget;
+            if (td.querySelector('input')) return;
+
+            const oldVal = excelRows[parcelIdx]?.[colName] ?? '';
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = oldVal;
+            input.className = 'w-full px-1.5 py-0.5 text-xs border border-blue-500 rounded bg-white text-slate-900 focus:outline-none';
+
+            const commit = () => {
+                const newVal = input.value;
+                if (excelRows[parcelIdx]) {
+                    excelRows[parcelIdx][colName] = newVal;
+                    hasUnsavedEdits = true;
+                    document.getElementById('btn-export-modified').classList.remove('hidden');
+                    reprocessMapping();
+                    if (selectedParcelIdx === parcelIdx) openDetailPanel(parcelIdx);
+                }
+            };
+
+            input.onkeydown = (e) => {
+                if (e.key === 'Enter') commit();
+                else if (e.key === 'Escape') filterAndRenderTable();
+            };
+            input.onblur = commit;
+
+            td.textContent = '';
+            td.appendChild(input);
+            input.focus();
+            input.select();
+        }
+
+        // ==========================================
+        // 9. 우측 상세 패널 & 엑셀 행 직접 편집
+        // ==========================================
+        function selectParcel(parcelIdx, zoomTo) {
+            selectedParcelIdx = parcelIdx;
+            const p = mappedParcels[parcelIdx];
+            if (!p) return;
+
+            renderMapParcels();
+            if (zoomTo && p.isMatched && p.center) {
+                map.setView(p.center, Math.max(map.getZoom(), 17));
+            }
+            openDetailPanel(parcelIdx);
+        }
+
+        function openDetailPanel(parcelIdx) {
+            const p = mappedParcels[parcelIdx];
+            if (!p) return;
+            const panel = document.getElementById('detail-panel');
+            panel.classList.remove('hidden');
+
+            document.getElementById('detail-jibun').textContent = p.normJibun;
+            const badge = document.getElementById('detail-match-badge');
+            if (p.isMatched) {
+                badge.textContent = '지적경계 일치';
+                badge.className = 'text-[10px] px-1.5 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-300';
+            } else {
+                badge.textContent = '미조회 필지';
+                badge.className = 'text-[10px] px-1.5 py-0.5 rounded font-bold bg-rose-500/20 text-rose-300';
+            }
+
+            const content = document.getElementById('detail-content');
+            content.innerHTML = excelHeaders.map(h => {
+                const val = p.raw[h] !== undefined ? p.raw[h] : '';
+                return `
+                    <div>
+                        <label class="block text-[11px] font-semibold text-slate-500 mb-0.5">${escapeHtml(h)}</label>
+                        <input type="text" data-detail-col="${escapeHtml(h)}" value="${escapeHtml(val)}" onkeydown="if(event.key==='Enter') saveDetailPanelEdits()"
+                            class="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white text-slate-900 focus:outline-none focus:border-blue-500">
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function closeDetailPanel() {
+            selectedParcelIdx = null;
+            document.getElementById('detail-panel').classList.add('hidden');
+            renderMapParcels();
+        }
+
+        function saveDetailPanelEdits() {
+            if (selectedParcelIdx === null || !excelRows[selectedParcelIdx]) return;
+            const inputs = document.querySelectorAll('#detail-content input[data-detail-col]');
+            inputs.forEach(inp => {
+                const col = inp.getAttribute('data-detail-col');
+                excelRows[selectedParcelIdx][col] = inp.value;
+            });
+            hasUnsavedEdits = true;
+            document.getElementById('btn-export-modified').classList.remove('hidden');
+            reprocessMapping();
+            openDetailPanel(selectedParcelIdx);
+            showToast("필지 속성 수정사항을 반영했습니다.");
+        }
+
+        // ==========================================
+        // 10. CAD(DXF) 사업구간 해치 & 텍스트 추출 및 자동 정합
+        // ==========================================
+        function handleCadDxfUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const text = e.target.result;
+                    const parsed = parseDxfHatchAndTexts(text);
+                    if (parsed.polygons.length === 0) {
+                        showToast("DXF 파일에서 텍스트가 매칭된 사업구간 해치(HATCH)를 찾지 못했습니다.");
+                        return;
+                    }
+
+                    cadRawPolygons = parsed.polygons;
+                    document.getElementById('cad-control-panel').classList.remove('hidden');
+                    document.getElementById('cad-layer-toggle-wrap').classList.remove('hidden');
+                    document.getElementById('cad-zone-summary').textContent = `CAD 사업구간 ${cadRawPolygons.length}개 로드됨`;
+
+                    detectCadCoordinateSystem();
+                    updateCadZoneFilterDropdown();
+                    reprocessMapping();
+                    fitCadZones();
+                    showToast(`CAD 사업구간 ${cadRawPolygons.length}개 추출 완료 (해치 위·겹침 텍스트 기준)`);
+                } catch (err) {
+                    showToast("DXF 파일 분석 오류: " + err.message);
+                }
+            };
+            reader.readAsText(file, 'utf-8');
+            event.target.value = '';
+        }
+
+        function parseDxfHatchAndTexts(dxfText) {
+            const lines = dxfText.split(/\r?\n/);
+            const pairs = [];
+            for (let i = 0; i + 1 < lines.length; i += 2) {
+                const code = parseInt(lines[i].trim(), 10);
+                const val = lines[i + 1].trim();
+                if (!isNaN(code)) pairs.push({ code, val });
+            }
+
+            const hatchPolys = [];
+            const texts = [];
+            let i = 0;
+
+            while (i < pairs.length) {
+                const p = pairs[i];
+                // 1. 문자(TEXT, MTEXT) 엔티티 및 문자 높이/폭 추정치 추출
+                if (p.code === 0 && (p.val === 'TEXT' || p.val === 'MTEXT')) {
+                    let layer = '0', tx = null, ty = null, tx2 = null, ty2 = null, txtStr = '', textHeight = 2.5;
+                    i++;
+                    while (i < pairs.length && pairs[i].code !== 0) {
+                        const c = pairs[i].code, v = pairs[i].val;
+                        if (c === 8) layer = v;
+                        else if (c === 10) tx = parseFloat(v);
+                        else if (c === 20) ty = parseFloat(v);
+                        else if (c === 11) tx2 = parseFloat(v);
+                        else if (c === 21) ty2 = parseFloat(v);
+                        else if (c === 40) {
+                            const hVal = parseFloat(v);
+                            if (!isNaN(hVal) && hVal > 0) textHeight = hVal;
+                        }
+                        else if (c === 1 || c === 3) txtStr += v;
+                        i++;
+                    }
+                    const cleanTxt = cleanCadMtext(txtStr);
+                    if (cleanTxt && tx !== null && ty !== null && !isNaN(tx) && !isNaN(ty)) {
+                        // 정렬점(11, 21)이 유효하면 중심 보정에 활용
+                        const cx = (tx2 !== null && !isNaN(tx2) && (tx2 !== 0 || ty2 !== 0)) ? (tx + tx2) / 2 : tx;
+                        const cy = (ty2 !== null && !isNaN(ty2) && (tx2 !== 0 || ty2 !== 0)) ? (ty + ty2) / 2 : ty;
+                        texts.push({
+                            layer,
+                            x: tx,
+                            y: ty,
+                            cx,
+                            cy,
+                            height: textHeight,
+                            text: cleanTxt
+                        });
+                    }
+                    continue;
+                }
+
+                // 2. 오직 HATCH 엔티티의 외곽 경계 루프만 추출 (중복 섬/내부 구멍 루프 제외)
+                if (p.code === 0 && p.val === 'HATCH') {
+                    let layer = '0';
+                    let expectedVerts = 0;
+                    let collectedInPath = 0;
+                    let inBoundary = false;
+                    let currentPathFlag = 0;
+                    let pathsInThisHatch = [];
+                    let curPathPts = [];
+                    let curX = null;
+
+                    const pushCurrentPath = () => {
+                        if (curPathPts.length >= 3) {
+                            const cleaned = filterOutlierVertices(curPathPts);
+                            if (cleaned.length >= 3) {
+                                pathsInThisHatch.push({
+                                    flag: currentPathFlag,
+                                    points: cleaned,
+                                    area: computePolygonAreaXY(cleaned)
+                                });
+                            }
+                        }
+                        curPathPts = [];
+                        expectedVerts = 0;
+                        collectedInPath = 0;
+                        curX = null;
+                    };
+
+                    i++;
+                    while (i < pairs.length && pairs[i].code !== 0) {
+                        const c = pairs[i].code, v = pairs[i].val;
+                        if (c === 8) {
+                            layer = v;
+                        } else if (c === 91) {
+                            inBoundary = true;
+                        } else if (c === 92 && inBoundary) {
+                            pushCurrentPath();
+                            currentPathFlag = parseInt(v, 10) || 0;
+                        } else if (c === 93 && inBoundary) {
+                            if (curPathPts.length > 0) pushCurrentPath();
+                            expectedVerts = parseInt(v, 10) || 0;
+                            collectedInPath = 0;
+                        } else if (c === 75 || c === 98 || c === 53) {
+                            pushCurrentPath();
+                            inBoundary = false;
+                        } else if (inBoundary && expectedVerts > 0 && collectedInPath < expectedVerts) {
+                            if (c === 10) {
+                                curX = parseFloat(v);
+                            } else if (c === 20 && curX !== null) {
+                                const y = parseFloat(v);
+                                if (!isNaN(curX) && !isNaN(y)) {
+                                    curPathPts.push([curX, y]);
+                                    collectedInPath++;
+                                }
+                                curX = null;
+                            }
+                        }
+                        i++;
+                    }
+                    pushCurrentPath();
+
+                    // 하나의 HATCH 안에 여러 경계 루프가 있는 경우, 가장 큰 외부 경계(Outer loop)만 채택
+                    if (pathsInThisHatch.length > 0) {
+                        const outerCandidates = pathsInThisHatch.filter(pt => (pt.flag & 1) === 1 || (pt.flag & 16) === 16);
+                        const targetPool = outerCandidates.length > 0 ? outerCandidates : pathsInThisHatch;
+                        targetPool.sort((a, b) => b.area - a.area);
+                        const mainOuter = targetPool[0];
+                        if (mainOuter && mainOuter.area > 0) {
+                            hatchPolys.push({ layer, points: mainOuter.points, area: mainOuter.area });
+                        }
+                    }
+                    continue;
+                }
+                i++;
+            }
+
+            // 3. 해치 내부에 있거나 해치 경계와 겹치는 텍스트가 있는 해치만 사업구간으로 채택 (임의 추가 방지)
+            const polygons = [];
+            const usedTextIndices = new Set();
+
+            hatchPolys.forEach((poly) => {
+                const matchedTexts = [];
+                texts.forEach((t, tIdx) => {
+                    if (isTextInsideOrOverlappingPolygon(t, poly.points)) {
+                        matchedTexts.push({ t, tIdx });
+                    }
+                });
+
+                // 해치 안이나 겹치는 글자가 없으면 임의로 사업구간을 생성·추가하지 않음
+                if (matchedTexts.length === 0) return;
+
+                matchedTexts.sort((a, b) => b.t.y - a.t.y);
+                matchedTexts.forEach(item => usedTextIndices.add(item.tIdx));
+                const zoneName = matchedTexts.map(item => item.t.text).join(' ').trim();
+                if (!zoneName) return;
+
+                polygons.push({
+                    id: polygons.length,
+                    name: zoneName,
+                    layer: poly.layer,
+                    points: poly.points,
+                    latLngs: []
+                });
+            });
+
+            return { polygons, texts };
+        }
+
+        function computePolygonAreaXY(pts) {
+            let area = 0;
+            for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+                area += (pts[j][0] + pts[i][0]) * (pts[j][1] - pts[i][1]);
+            }
+            return Math.abs(area / 2);
+        }
+
+        function distancePointToSegmentXY(px, py, x1, y1, x2, y2) {
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq === 0) return Math.hypot(px - x1, py - y1);
+            let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+            t = Math.max(0, Math.min(1, t));
+            return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+        }
+
+        function isTextInsideOrOverlappingPolygon(textObj, polyPts) {
+            // 1) 텍스트 삽입점(x, y) 또는 중심점(cx, cy)이 해치 폴리곤 내부에 있는 경우
+            if (isPointInPolygonXY(textObj.x, textObj.y, polyPts)) return true;
+            if (isPointInPolygonXY(textObj.cx, textObj.cy, polyPts)) return true;
+
+            // 2) 텍스트의 가로/세로 영역(바운딩 샘플 포인트)이 해치와 겹치는 경우
+            const estWidth = Math.max(textObj.text.length * textObj.height * 0.7, textObj.height);
+            const estHeight = textObj.height;
+            const samplePts = [
+                [textObj.x + estWidth * 0.5, textObj.y],
+                [textObj.x + estWidth, textObj.y],
+                [textObj.x + estWidth * 0.5, textObj.y + estHeight * 0.5],
+                [textObj.x, textObj.y + estHeight * 0.5]
+            ];
+            for (const [sx, sy] of samplePts) {
+                if (isPointInPolygonXY(sx, sy, polyPts)) return true;
+            }
+
+            // 3) 텍스트 중심이 해치 경계선과 문자 높이(여유 반경) 이내로 겹치는 경우
+            const overlapTolerance = Math.max(estHeight * 1.2, 1.0);
+            for (let i = 0, j = polyPts.length - 1; i < polyPts.length; j = i++) {
+                const dist = distancePointToSegmentXY(
+                    textObj.cx, textObj.cy,
+                    polyPts[j][0], polyPts[j][1],
+                    polyPts[i][0], polyPts[i][1]
+                );
+                if (dist <= overlapTolerance) return true;
+            }
+
+            return false;
+        }
+
+        function cleanCadMtext(raw) {
+            if (!raw) return '';
+            return raw
+                .replace(/\\P/gi, ' ')
+                .replace(/\{\\[^;]+;/g, '')
+                .replace(/[{}]/g, '')
+                .replace(/\\[A-Za-z0-9.]+;?/g, '')
+                .trim();
+        }
+
+        function filterOutlierVertices(pts) {
+            if (pts.length <= 3) return pts;
+            const xs = pts.map(p => p[0]).sort((a, b) => a - b);
+            const ys = pts.map(p => p[1]).sort((a, b) => a - b);
+            const medX = xs[Math.floor(xs.length / 2)];
+            const medY = ys[Math.floor(ys.length / 2)];
+            const q1X = xs[Math.floor(xs.length * 0.25)], q3X = xs[Math.floor(xs.length * 0.75)];
+            const q1Y = ys[Math.floor(ys.length * 0.25)], q3Y = ys[Math.floor(ys.length * 0.75)];
+            const span = Math.max(q3X - q1X, q3Y - q1Y, 10) * 15;
+
+            return pts.filter(p => Math.abs(p[0] - medX) <= span && Math.abs(p[1] - medY) <= span);
+        }
+
+        function detectCadCoordinateSystem() {
+            if (cadRawPolygons.length === 0) return;
+            const sample = cadRawPolygons[0].points[0];
+            const x = sample[0], y = sample[1];
+            const crsSel = document.getElementById('cad-crs-select');
+
+            if (x > 900000 && x < 1100000 && y > 1800000 && y < 2100000) {
+                crsSel.value = 'EPSG:5179';
+                cadTransformState.mode = 'EPSG:5179';
+                reprojectCadZones();
+            } else if (x > 150000 && x < 250000 && y > 520000 && y < 600000) {
+                crsSel.value = 'EPSG:5186';
+                cadTransformState.mode = 'EPSG:5186';
+                reprojectCadZones();
+            } else {
+                crsSel.value = 'AUTO';
+                cadTransformState.mode = 'AUTO';
+                autoSnapCadToCadastralParcels(false);
+            }
+        }
+
+        function autoSnapCadToCadastralParcels(showAlert) {
+            if (cadRawPolygons.length === 0) return;
+            let cadMinX = Infinity, cadMaxX = -Infinity, cadMinY = Infinity, cadMaxY = -Infinity;
+            cadRawPolygons.forEach(poly => {
+                poly.points.forEach(([x, y]) => {
+                    if (x < cadMinX) cadMinX = x;
+                    if (x > cadMaxX) cadMaxX = x;
+                    if (y < cadMinY) cadMinY = y;
+                    if (y > cadMaxY) cadMaxY = y;
+                });
+            });
+            const cadCenterX = (cadMinX + cadMaxX) / 2;
+            const cadCenterY = (cadMinY + cadMaxY) / 2;
+            const cadWidth = Math.max(cadMaxX - cadMinX, 1);
+            const cadHeight = Math.max(cadMaxY - cadMinY, 1);
+
+            // 조회된 실제 지적 필지들의 바운딩박스 계산
+            let pMinLat = Infinity, pMaxLat = -Infinity, pMinLng = Infinity, pMaxLng = -Infinity;
+            let matchedCnt = 0;
+            mappedParcels.forEach(p => {
+                if (p.isMatched && p.rings && p.rings[0]) {
+                    matchedCnt++;
+                    p.rings[0].forEach(([lat, lng]) => {
+                        if (lat < pMinLat) pMinLat = lat;
+                        if (lat > pMaxLat) pMaxLat = lat;
+                        if (lng < pMinLng) pMinLng = lng;
+                        if (lng > pMaxLng) pMaxLng = lng;
+                    });
+                }
+            });
+
+            let targetCenterLat = CHANGNEUNG_CENTER[0];
+            let targetCenterLng = CHANGNEUNG_CENTER[1];
+            let targetWidthM = 1800;
+            let targetHeightM = 1800;
+
+            if (matchedCnt >= 2 && isFinite(pMinLat)) {
+                targetCenterLat = (pMinLat + pMaxLat) / 2;
+                targetCenterLng = (pMinLng + pMaxLng) / 2;
+                const mPerLat = 111320;
+                const mPerLng = 111320 * Math.cos(targetCenterLat * Math.PI / 180);
+                targetHeightM = Math.max((pMaxLat - pMinLat) * mPerLat, 50);
+                targetWidthM = Math.max((pMaxLng - pMinLng) * mPerLng, 50);
+            }
+
+            const scaleX = targetWidthM / cadWidth;
+            const scaleY = targetHeightM / cadHeight;
+            const fitScale = (scaleX + scaleY) / 2;
+
+            cadTransformState = {
+                mode: 'AUTO',
+                originCadX: cadCenterX,
+                originCadY: cadCenterY,
+                originLng: targetCenterLng,
+                originLat: targetCenterLat,
+                scale: fitScale,
+                rotationRad: 0
+            };
+            document.getElementById('cad-crs-select').value = 'AUTO';
+            reprojectCadZones();
+            if (showAlert) {
+                showToast("조회된 지적 필지 영역 크기에 맞춰 CAD 사업구간을 자동 정렬했습니다.");
+            }
+        }
+
+        function reprojectCadZones() {
+            const crs = document.getElementById('cad-crs-select').value;
+            cadTransformState.mode = crs;
+
+            const mPerLat = 111320;
+            const mPerLng = 111320 * Math.cos(cadTransformState.originLat * Math.PI / 180);
+
+            cadRawPolygons.forEach(poly => {
+                poly.latLngs = poly.points.map(([x, y]) => {
+                    if (crs !== 'AUTO' && typeof proj4 !== 'undefined') {
+                        const [lng, lat] = proj4(crs, 'EPSG:4326', [x, y]);
+                        return [lat, lng];
+                    }
+                    const dx = (x - cadTransformState.originCadX) * cadTransformState.scale;
+                    const dy = (y - cadTransformState.originCadY) * cadTransformState.scale;
+                    const cosR = Math.cos(cadTransformState.rotationRad);
+                    const sinR = Math.sin(cadTransformState.rotationRad);
+                    const rx = dx * cosR - dy * sinR;
+                    const ry = dx * sinR + dy * cosR;
+                    const lat = cadTransformState.originLat + (ry / mPerLat);
+                    const lng = cadTransformState.originLng + (rx / mPerLng);
+                    return [lat, lng];
+                });
+            });
+
+            renderCadZonesOnMap();
+            reprocessMapping();
+        }
+
+        function renderCadZonesOnMap() {
+            cadZoneLayerGroup.clearLayers();
+            cadLabelLayerGroup.clearLayers();
+            const showCad = document.getElementById('toggle-cad-zones')?.checked;
+            if (!showCad) return;
+
+            cadRawPolygons.forEach((poly, idx) => {
+                if (!poly.latLngs || poly.latLngs.length < 3) return;
+                const zoneColor = COLOR_PALETTE[(idx + 4) % COLOR_PALETTE.length];
+                const layer = L.polygon(poly.latLngs, {
+                    color: '#6d28d9',
+                    weight: 2.2,
+                    dashArray: '5, 4',
+                    fillColor: zoneColor,
+                    fillOpacity: 0.16
+                });
+
+                layer.on('click', (e) => {
+                    L.DomEvent.stopPropagation(e);
+                    if (cadAlignMode) {
+                        handleCadAlignMapClick(e.latlng);
+                        return;
+                    }
+                    const filterSel = document.getElementById('cad-zone-filter');
+                    filterSel.value = `zone:${poly.name}`;
+                    setCadZoneFilter(`zone:${poly.name}`);
+                    showToast(`[${poly.name}] 사업구간 내 포함 지번으로 필터링했습니다.`);
+                });
+
+                layer.addTo(cadZoneLayerGroup);
+
+                const center = computeRingsCenter([poly.latLngs]);
+                L.marker(center, {
+                    interactive: false,
+                    icon: L.divIcon({
+                        className: 'cad-zone-label',
+                        html: escapeHtml(poly.name),
+                        iconSize: null
+                    })
+                }).addTo(cadLabelLayerGroup);
+            });
+        }
+
+        function toggleCadZonesLayer(visible) {
+            if (visible) renderCadZonesOnMap();
+            else {
+                cadZoneLayerGroup.clearLayers();
+                cadLabelLayerGroup.clearLayers();
+            }
+        }
+
+        function fitCadZones() {
+            const pts = [];
+            cadRawPolygons.forEach(p => {
+                if (p.latLngs) p.latLngs.forEach(ll => pts.push(ll));
+            });
+            if (pts.length > 0) {
+                map.fitBounds(L.latLngBounds(pts), { padding: [50, 50], maxZoom: 17 });
+            }
+        }
+
+        function findCadZoneForLatLng(lat, lng) {
+            if (cadRawPolygons.length === 0) return '';
+            const matchedNames = [];
+            cadRawPolygons.forEach(poly => {
+                if (poly.latLngs && poly.latLngs.length >= 3 && isPointInPolygonLatLng(lat, lng, poly.latLngs)) {
+                    if (!matchedNames.includes(poly.name)) matchedNames.push(poly.name);
+                }
+            });
+            return matchedNames.join(', ');
+        }
+
+        function isPointInPolygonXY(x, y, polyPts) {
+            let inside = false;
+            for (let i = 0, j = polyPts.length - 1; i < polyPts.length; j = i++) {
+                const xi = polyPts[i][0], yi = polyPts[i][1];
+                const xj = polyPts[j][0], yj = polyPts[j][1];
+                const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-12) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+
+        function isPointInPolygonLatLng(lat, lng, latLngs) {
+            let inside = false;
+            for (let i = 0, j = latLngs.length - 1; i < latLngs.length; j = i++) {
+                const yi = latLngs[i][0], xi = latLngs[i][1];
+                const yj = latLngs[j][0], xj = latLngs[j][1];
+                const intersect = ((yi > lat) !== (yj > lat)) && (lng < (xj - xi) * (lat - yi) / ((yj - yi) || 1e-12) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+
+        function updateCadZoneFilterDropdown() {
+            const sel = document.getElementById('cad-zone-filter');
+            const uniqueNames = [...new Set(cadRawPolygons.map(p => p.name))];
+            sel.innerHTML = `
+                <option value="all">전체 사업구간 지번 보기</option>
+                <option value="in_any_zone">사업구간 내 포함 지번만</option>
+                <option value="outside_zone">사업구간 외 지번만</option>
+            ` + uniqueNames.map(n => {
+                const label = n.length > 24 ? n.slice(0, 24) + '…' : n;
+                return `<option value="zone:${escapeHtml(n)}" title="${escapeHtml(n)}">구간: ${escapeHtml(label)}</option>`;
+            }).join('');
+        }
+
+        function setCadZoneFilter(val) {
+            currentCadFilter = val;
+            filterAndRenderTable();
+            // 특정 사업구간이나 구간 내 필지를 선택하면 상단 설정 영역을 자동으로 접어 엑셀 표 공간을 넓힘
+            if (val !== 'all') {
+                setConfigPanelCollapsed(true);
+            }
+        }
+
+        function appendCadZoneColumnToExcel() {
+            if (excelRows.length === 0 || cadRawPolygons.length === 0) {
+                showToast("엑셀 데이터와 CAD 사업구간이 모두 필요합니다.");
+                return;
+            }
+            const colName = '사업구간(CAD)';
+            if (!excelHeaders.includes(colName)) {
+                excelHeaders.push(colName);
+            }
+
+            let assignedCount = 0;
+            mappedParcels.forEach(p => {
+                const zName = p.center ? findCadZoneForLatLng(p.center[0], p.center[1]) : '';
+                excelRows[p.idx][colName] = zName;
+                if (zName) assignedCount++;
+            });
+
+            hasUnsavedEdits = true;
+            document.getElementById('btn-export-modified').classList.remove('hidden');
+            populateColumnDropdowns();
+            updateColumnManagerUI();
+            reprocessMapping();
+            showToast(`엑셀에 [${colName}] 열을 추가했습니다 (구간 포함 ${assignedCount}건).`);
+        }
+
+        // CAD 위치·스케일·회전 보정 모달 제어
+        function openCadAlignModal() {
+            document.getElementById('cad-offset-x').value = 0;
+            document.getElementById('cad-offset-y').value = 0;
+            document.getElementById('cad-scale-input').value = cadTransformState.scale.toFixed(4);
+            document.getElementById('cad-rot-input').value = (cadTransformState.rotationRad * 180 / Math.PI).toFixed(2);
+            document.getElementById('cad-align-modal').classList.remove('hidden');
+        }
+
+        function closeCadAlignModal() {
+            document.getElementById('cad-align-modal').classList.add('hidden');
+        }
+
+        function startTwoPointCadAlign() {
+            closeCadAlignModal();
+            cadAlignMode = '2pt';
+            cadAlignClicks = [];
+            showToast("[1/4] 지도 위의 CAD 도면 첫 번째 기준점을 클릭하세요.");
+        }
+
+        function startOnePointCadShift() {
+            closeCadAlignModal();
+            cadAlignMode = '1pt';
+            cadAlignClicks = [];
+            showToast("[1/2] 지도 위의 CAD 도면 이동 기준점을 클릭하세요.");
+        }
+
+        function handleCadAlignMapClick(latlng) {
+            cadAlignClicks.push(latlng);
+            if (cadAlignMode === '1pt') {
+                if (cadAlignClicks.length === 1) {
+                    showToast("[2/2] 이동시킬 실제 지적도 목표 지점을 클릭하세요.");
+                } else if (cadAlignClicks.length === 2) {
+                    const dLat = cadAlignClicks[1].lat - cadAlignClicks[0].lat;
+                    const dLng = cadAlignClicks[1].lng - cadAlignClicks[0].lng;
+                    cadTransformState.originLat += dLat;
+                    cadTransformState.originLng += dLng;
+                    cadTransformState.mode = 'AUTO';
+                    document.getElementById('cad-crs-select').value = 'AUTO';
+                    cadAlignMode = null;
+                    cadAlignClicks = [];
+                    reprojectCadZones();
+                    showToast("1점 기준점 평행이동 완료!");
+                }
+            } else if (cadAlignMode === '2pt') {
+                if (cadAlignClicks.length === 1) {
+                    showToast("[2/4] CAD 도면의 두 번째 기준점을 클릭하세요.");
+                } else if (cadAlignClicks.length === 2) {
+                    showToast("[3/4] 첫 번째 기준점에 대응하는 실제 지적도 위치를 클릭하세요.");
+                } else if (cadAlignClicks.length === 3) {
+                    showToast("[4/4] 두 번째 기준점에 대응하는 실제 지적도 위치를 클릭하세요.");
+                } else if (cadAlignClicks.length === 4) {
+                    const [c1, c2, m1, m2] = cadAlignClicks;
+                    const mPerLat = 111320;
+                    const mPerLng = 111320 * Math.cos(m1.lat * Math.PI / 180);
+
+                    const vCadX = (c2.lng - c1.lng) * mPerLng;
+                    const vCadY = (c2.lat - c1.lat) * mPerLat;
+                    const vMapX = (m2.lng - m1.lng) * mPerLng;
+                    const vMapY = (m2.lat - m1.lat) * mPerLat;
+
+                    const lenCad = Math.hypot(vCadX, vCadY) || 1;
+                    const lenMap = Math.hypot(vMapX, vMapY) || 1;
+                    const scaleRatio = lenMap / lenCad;
+                    const dAngle = Math.atan2(vMapY, vMapX) - Math.atan2(vCadY, vCadX);
+
+                    // 현재 origin을 c1 기준 회전·스케일 후 m1으로 이동
+                    const ox = (cadTransformState.originLng - c1.lng) * mPerLng * scaleRatio;
+                    const oy = (cadTransformState.originLat - c1.lat) * mPerLat * scaleRatio;
+                    const rox = ox * Math.cos(dAngle) - oy * Math.sin(dAngle);
+                    const roy = ox * Math.sin(dAngle) + oy * Math.cos(dAngle);
+
+                    cadTransformState.originLng = m1.lng + (rox / mPerLng);
+                    cadTransformState.originLat = m1.lat + (roy / mPerLat);
+                    cadTransformState.scale *= scaleRatio;
+                    cadTransformState.rotationRad += dAngle;
+                    cadTransformState.mode = 'AUTO';
+                    document.getElementById('cad-crs-select').value = 'AUTO';
+
+                    cadAlignMode = null;
+                    cadAlignClicks = [];
+                    reprojectCadZones();
+                    showToast("2점 기준점(위치·축척·회전) 정밀 맞춤 완료!");
+                }
+            }
+        }
+
+        function applyManualCadTransform() {
+            const dxM = parseFloat(document.getElementById('cad-offset-x').value) || 0;
+            const dyM = parseFloat(document.getElementById('cad-offset-y').value) || 0;
+            const newScale = parseFloat(document.getElementById('cad-scale-input').value);
+            const deg = parseFloat(document.getElementById('cad-rot-input').value) || 0;
+
+            const mPerLat = 111320;
+            const mPerLng = 111320 * Math.cos(cadTransformState.originLat * Math.PI / 180);
+
+            cadTransformState.originLng += dxM / mPerLng;
+            cadTransformState.originLat += dyM / mPerLat;
+            if (!isNaN(newScale) && newScale > 0) cadTransformState.scale = newScale;
+            cadTransformState.rotationRad = deg * Math.PI / 180;
+            cadTransformState.mode = 'AUTO';
+            document.getElementById('cad-crs-select').value = 'AUTO';
+
+            document.getElementById('cad-offset-x').value = 0;
+            document.getElementById('cad-offset-y').value = 0;
+            reprojectCadZones();
+        }
+
+        // CAD 구간명 편집 모달
+        function openCadRenameModal() {
+            const list = document.getElementById('cad-rename-list');
+            list.innerHTML = cadRawPolygons.map((p, idx) => `
+                <div class="flex items-center space-x-2 bg-slate-50 p-2 rounded-lg border border-slate-200">
+                    <span class="text-[11px] font-mono text-slate-400 w-8">#${idx + 1}</span>
+                    <input type="text" data-cad-idx="${idx}" value="${escapeHtml(p.name)}" class="flex-1 text-xs border border-slate-300 rounded px-2 py-1 bg-white">
+                </div>
+            `).join('');
+            document.getElementById('cad-rename-modal').classList.remove('hidden');
+        }
+
+        function closeCadRenameModal() {
+            document.getElementById('cad-rename-modal').classList.add('hidden');
+        }
+
+        function saveCadZoneNames() {
+            document.querySelectorAll('#cad-rename-list input[data-cad-idx]').forEach(inp => {
+                const idx = parseInt(inp.getAttribute('data-cad-idx'), 10);
+                if (cadRawPolygons[idx] && inp.value.trim()) {
+                    cadRawPolygons[idx].name = inp.value.trim();
+                }
+            });
+            closeCadRenameModal();
+            updateCadZoneFilterDropdown();
+            renderCadZonesOnMap();
+            reprocessMapping();
+            showToast("CAD 사업구간 명칭을 업데이트했습니다.");
+        }
+
+        // ==========================================
+        // 11. 엑셀 내보내기 (수정본 전체 & 미조회 추출) & 작업 저장/불러오기
+        // ==========================================
+        function exportModifiedExcel() {
+            if (excelRows.length === 0) {
+                showToast("내보낼 엑셀 데이터가 없습니다.");
+                return;
+            }
+            const ws = XLSX.utils.json_to_sheet(excelRows, { header: excelHeaders });
+
+            // 웹에서 조절한 열 너비 및 숨기기 상태를 엑셀 파일(!cols)에 그대로 기록
+            ws['!cols'] = excelHeaders.map(h => {
+                const px = excelColumnWidths[h] || 110;
+                const isHidden = hiddenExcelColumns.has(h);
+                return {
+                    wpx: px,
+                    wch: Math.max(6, Math.round(px / 7.5)),
+                    hidden: isHidden
+                };
+            });
+
+            const wb = workbookObj || XLSX.utils.book_new();
+            const activeSheet = document.getElementById('sheet-select').value || '지번조서';
+            if (wb.SheetNames.includes(activeSheet)) {
+                wb.Sheets[activeSheet] = ws;
+            } else {
+                XLSX.utils.book_append_sheet(wb, ws, activeSheet);
+            }
+            const baseName = currentUploadedFileName.replace(/\.(xlsx|xls|csv)$/i, '');
+            const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+            XLSX.writeFile(wb, `${baseName}_수정본_${today}.xlsx`);
+            showToast(`수정된 내용 및 열 너비·숨김(${hiddenExcelColumns.size}개) 설정이 반영된 엑셀 파일을 저장했습니다.`);
+        }
+
+        function exportUnmatchedExcel() {
+            const unmatchedRows = mappedParcels.filter(p => !p.isMatched).map(p => p.raw);
+            if (unmatchedRows.length === 0) {
+                showToast("미조회 필지가 없습니다.");
+                return;
+            }
+            const ws = XLSX.utils.json_to_sheet(unmatchedRows, { header: excelHeaders });
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, '미조회_필지목록');
+            const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+            XLSX.writeFile(wb, `창릉지구_지적미조회_${today}.xlsx`);
+            showToast(`미조회 필지 ${unmatchedRows.length}건을 추출했습니다.`);
+        }
+
+        function exportWorkspaceProject() {
+            // 매핑된 각 행의 폴리곤도 안전하게 캐시에 동기화하여 복원 시 100% 자동 매핑 보장
+            const serializedCache = { ...vworldParcelCache };
+            mappedParcels.forEach(p => {
+                if (p.isMatched && p.rings && p.rings.length > 0) {
+                    const entry = { rings: p.rings, center: p.center };
+                    if (p.normJibun && !p.normJibun.startsWith('(')) {
+                        serializedCache[p.normJibun] = entry;
+                    }
+                    serializedCache[`__ROW_${p.idx}__`] = entry;
+                }
+            });
+
+            const payload = {
+                version: '1.2',
+                savedAt: new Date().toISOString(),
+                currentUploadedFileName,
+                savedVworldApiKey,
+                savedVworldDomain,
+                sheetName: document.getElementById('sheet-select').value || '복원시트',
+                headerRowMode: document.getElementById('header-row-select').value || 'auto',
+                excelHeaders,
+                excelRows,
+                hiddenExcelColumns: [...hiddenExcelColumns],
+                excelColumnWidths,
+                colJibun: document.getElementById('col-jibun-select').value,
+                colColor: document.getElementById('col-color-select').value,
+                vworldParcelCache: serializedCache,
+                legendStyleMap,
+                cadRawPolygons,
+                cadTransformState,
+                cadCrs: document.getElementById('cad-crs-select').value
+            };
+
+            const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+            a.href = url;
+            a.download = `창릉지구_GIS작업파일_${today}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast("현재 엑셀·CAD·API·매핑 결과를 작업 파일(.json)로 저장했습니다.");
+        }
+
+        function importWorkspaceProject(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    currentUploadedFileName = data.currentUploadedFileName || '복원된_지번조서.xlsx';
+                    if (data.savedVworldApiKey) savedVworldApiKey = data.savedVworldApiKey;
+                    if (data.savedVworldDomain) savedVworldDomain = data.savedVworldDomain;
+                    excelHeaders = data.excelHeaders || [];
+                    excelRows = data.excelRows || [];
+                    hiddenExcelColumns = new Set(data.hiddenExcelColumns || []);
+                    excelColumnWidths = data.excelColumnWidths || {};
+                    vworldParcelCache = data.vworldParcelCache || {};
+                    legendStyleMap = data.legendStyleMap || {};
+                    cadRawPolygons = data.cadRawPolygons || [];
+                    if (data.cadTransformState) cadTransformState = data.cadTransformState;
+
+                    if (excelHeaders.length > 0) {
+                        const restoredSheet = data.sheetName || '복원시트';
+                        document.getElementById('sheet-select').innerHTML = `<option value="${escapeHtml(restoredSheet)}">${escapeHtml(restoredSheet)}</option>`;
+                        if (data.headerRowMode) {
+                            document.getElementById('header-row-select').value = data.headerRowMode;
+                        }
+                        populateColumnDropdowns();
+                        updateColumnManagerUI();
+                        const jibunSel = document.getElementById('col-jibun-select');
+                        const colorSel = document.getElementById('col-color-select');
+                        if (data.colJibun && [...jibunSel.options].some(o => o.value === data.colJibun)) {
+                            jibunSel.value = data.colJibun;
+                        }
+                        if (data.colColor && [...colorSel.options].some(o => o.value === data.colColor)) {
+                            colorSel.value = data.colColor;
+                        }
+                        document.getElementById('btn-export-modified').classList.remove('hidden');
+                    }
+
+                    if (cadRawPolygons.length > 0) {
+                        document.getElementById('cad-control-panel').classList.remove('hidden');
+                        document.getElementById('cad-layer-toggle-wrap').classList.remove('hidden');
+                        document.getElementById('cad-zone-summary').textContent = `CAD 사업구간 ${cadRawPolygons.length}개 로드됨`;
+                        if (data.cadCrs) document.getElementById('cad-crs-select').value = data.cadCrs;
+                        updateCadZoneFilterDropdown();
+                        renderCadZonesOnMap();
+                    }
+
+                    if (savedVworldApiKey) {
+                        configureVworldBaseLayers(savedVworldApiKey);
+                        setBaseMap('vworld');
+                        document.getElementById('cadastral-status-text').textContent = "브이월드 API 연결됨 · 매핑 결과 자동 복원 완료";
+                    }
+
+                    reprocessMapping();
+                    fitAllParcels();
+                    const restoredMatched = mappedParcels.filter(p => p.isMatched).length;
+                    showToast(`작업 프로젝트 복원 완료 (지적 매핑 ${restoredMatched}필지 자동 반영)`);
+                } catch (err) {
+                    showToast("작업 파일 불러오기 오류: " + err.message);
+                }
+            };
+            reader.readAsText(file, 'utf-8');
+            event.target.value = '';
+        }
+
+        // ==========================================
+        // 12. 유틸리티 함수
+        // ==========================================
+        function setConfigPanelCollapsed(collapsed) {
+            const content = document.getElementById('config-collapsible-content');
+            const icon = document.getElementById('config-toggle-icon');
+            if (!content || !icon) return;
+            if (collapsed) {
+                content.classList.add('hidden');
+                icon.className = 'fa-solid fa-chevron-down text-xs';
+            } else {
+                content.classList.remove('hidden');
+                icon.className = 'fa-solid fa-chevron-up text-xs';
+            }
+        }
+
+        function toggleConfigPanel() {
+            const content = document.getElementById('config-collapsible-content');
+            if (!content) return;
+            const isHidden = content.classList.contains('hidden');
+            setConfigPanelCollapsed(!isHidden);
+        }
+
+        function escapeHtml(str) {
+            return String(str ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        let toastTimeout = null;
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toast-msg').textContent = msg;
+            toast.classList.remove('translate-y-20', 'opacity-0');
+            clearTimeout(toastTimeout);
+            toastTimeout = setTimeout(() => {
+                toast.classList.add('translate-y-20', 'opacity-0');
+            }, 3500);
+        }
+    </script>
+</body>
+</html>
